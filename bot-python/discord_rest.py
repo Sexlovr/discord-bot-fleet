@@ -20,20 +20,31 @@ from urllib.parse import quote, urlparse, urlencode
 import aiohttp
 
 DISCORD_API = 'https://discord.com/api/v10'
-# Optional Cloudflare Worker proxy for HF Space egress
-# Format: https://your-worker.workers.dev
-# If set, all Discord requests route through: <proxy>/proxy/<encoded-discord-url>
-DISCORD_PROXY_URL = os.environ.get('DISCORD_PROXY_URL', '').rstrip('/').strip()
+# Optional Cloudflare Worker proxy for HF Space egress — comma-separated list
+# for failover. Format:
+#   https://worker1.workers.dev,https://worker2.workers.dev
+# Each request picks a random worker from the list. If a worker fails, the next
+# one is tried. All workers must support /proxy/<encoded-url> routing.
+DISCORD_PROXY_URLS = [
+    u.strip().rstrip('/') for u in os.environ.get('DISCORD_PROXY_URL', '').split(',')
+    if u.strip()
+]
+
+# Round-robin state (per-process)
+_proxy_index = 0
 
 
 def _wrap_url(discord_path: str) -> str:
     """If DISCORD_PROXY_URL is set, return the Worker URL that proxies the Discord URL.
     Otherwise return the Discord URL directly.
     """
+    global _proxy_index
     target = f'{DISCORD_API}{discord_path}'
-    if not DISCORD_PROXY_URL:
+    if not DISCORD_PROXY_URLS:
         return target
-    return f'{DISCORD_PROXY_URL}/proxy/{quote(target, safe="")}'
+    proxy = DISCORD_PROXY_URLS[_proxy_index % len(DISCORD_PROXY_URLS)]
+    _proxy_index += 1
+    return f'{proxy}/proxy/{quote(target, safe="")}'
 
 
 class DiscordRestClient:
