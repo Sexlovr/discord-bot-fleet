@@ -382,19 +382,25 @@ async def main():
 
     log.info(f'Polling {len(channel_ids)} channels every {POLL_INTERVAL_SEC}s')
 
-    # Bootstrap: get the most recent message ID per channel so we only process NEW messages
-    log.info('Bootstrapping channel state...')
+    # Bootstrap: get the most recent message ID per channel so we only process NEW messages.
+    # Do this SEQUENTIALLY (not in parallel) to avoid hitting Discord's burst rate limit
+    # and overwhelming the CF Worker with simultaneous TLS handshakes.
+    log.info('Bootstrapping channel state (sequential to avoid burst rate limit)...')
     for cid in channel_ids:
-        try:
-            messages = await rest.get_recent_messages(cid, limit=1)
-            if messages:
-                last_seen_message_id[cid] = messages[-1].get('id', '')
-                log.debug(f'Channel {cid}: last seen message {last_seen_message_id[cid]}')
-            else:
+        for attempt in range(3):
+            try:
+                messages = await rest.get_recent_messages(cid, limit=1)
+                if messages:
+                    last_seen_message_id[cid] = messages[-1].get('id', '')
+                    log.debug(f'Channel {cid}: last seen message {last_seen_message_id[cid]}')
+                else:
+                    last_seen_message_id[cid] = '0'
+                break
+            except Exception as e:
+                log.warn(f'Bootstrap channel {cid} attempt {attempt+1}/3 failed', error=str(e)[:200])
                 last_seen_message_id[cid] = '0'
-        except Exception as e:
-            log.warn(f'Failed to bootstrap channel {cid}', error=str(e))
-            last_seen_message_id[cid] = '0'
+                await asyncio.sleep(2)
+        await asyncio.sleep(0.3)  # gentle pacing between channels
     log.info('Bootstrap complete')
 
     # Optional: send "online" message — comment out if you don't want this
