@@ -33,6 +33,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates bash \
     && rm -rf /var/lib/apt/lists/*
 
+# Bake a global git safe.directory exception. Without this, git refuses to
+# operate on /data/repo because HF mounts /data from a different UID.
+# See: https://git-scm.com/docs/git-config/#Documentation/git-config.txt-safedirectory
+RUN git config --global --add safe.directory '*'
+
 WORKDIR /app
 
 # Write the entrypoint script inline using a BuildKit heredoc.
@@ -109,9 +114,22 @@ fi
 if [ "$NEEDS_INSTALL" = "1" ]; then
   log "Installing dependencies (this may take a minute on first boot)..."
   npm install --no-audit --no-fund 2>&1 | tail -5
+  # Install typescript explicitly. It's in devDependencies, which `npm install`
+  # without `--include=dev` skips. Without this, `npx tsc` falls back to a
+  # deprecated stub that prints "this is not the tsc you are looking for"
+  # and exits 0 without compiling anything.
+  if ! npm ls typescript >/dev/null 2>&1; then
+    log "Installing typescript explicitly (devDependencies not installed in prod mode)..."
+    npm install --no-save --no-audit --no-fund typescript@^5.6.3 2>&1 | tail -3
+  fi
   log "Dependencies installed."
 else
   log "Dependencies up to date (node_modules present, package.json unchanged)."
+  # Still ensure typescript is present even on cached boots
+  if ! npm ls typescript >/dev/null 2>&1; then
+    log "Installing typescript explicitly..."
+    npm install --no-save --no-audit --no-fund typescript@^5.6.3 2>&1 | tail -3
+  fi
 fi
 
 # ─── Build TypeScript ──────────────────────────────────────────────────
