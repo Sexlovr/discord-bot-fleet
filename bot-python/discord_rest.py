@@ -57,13 +57,19 @@ class DiscordRestClient:
 
     async def _get_session(self) -> cf_requests.AsyncSession:
         if self._session is None:
-            # curl_cffi AsyncSession with Chrome impersonation to bypass CF WAF
+            # IMPORTANT: do NOT impersonate Chrome here.
+            # When we impersonate Chrome (JA3 + UA), Discord's Cloudflare WAF
+            # treats us as an automated browser and returns 40333 "internal
+            # network error". Using curl_cffi without impersonation lets us
+            # bypass Cloudflare's bot detection (curl_cffi uses BoringSSL
+            # which has a distinct but acceptable fingerprint) while still
+            # being treated as a "script" rather than a "browser".
             self._session = cf_requests.AsyncSession(
-                impersonate='chrome',
                 timeout=30,
                 headers={
                     'Authorization': f'Bot {self.token}',
-                    'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
+                    'User-Agent': 'DiscordBot (https://example.com, 1.0)',
+                    'Accept': 'application/json',
                 },
             )
         return self._session
