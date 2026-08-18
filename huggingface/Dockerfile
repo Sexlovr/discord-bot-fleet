@@ -123,7 +123,7 @@ fi
 
 if [ "$NEEDS_CLEAN_INSTALL" = "1" ]; then
   log "package.json changed or modules corrupted — clean reinstall..."
-  rm -rf node_modules
+  rm -rf node_modules package-lock.json
 fi
 if [ "$NEEDS_INSTALL" = "1" ]; then
   log "Installing dependencies (this may take a minute on first boot)..."
