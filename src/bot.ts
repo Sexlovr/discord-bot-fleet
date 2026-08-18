@@ -41,6 +41,7 @@ async function main() {
   const token = decryptString(configSafe.token_enc);
 
   // Init Discord client with required intents
+  // Bump rest+ws timeouts so we don't die on slow networks like HF Space egress
   const client = new Client({
     intents: [
       GatewayIntentBits.Guilds,
@@ -49,6 +50,7 @@ async function main() {
       GatewayIntentBits.GuildMembers,    // PRIVILEGED — must be enabled in Dev Portal
     ],
     partials: [Partials.Channel, Partials.Message],
+    rest: { timeout: 30000 },
   });
 
   // Per-(target bot + channel) in-flight summon queue.
@@ -381,11 +383,28 @@ async function main() {
     setTimeout(() => process.exit(0), 500);
   });
 
-  // Login
-  try {
-    await client.login(token);
-  } catch (e) {
-    log.error('Failed to login to Discord', { error: (e as Error).message });
+  // Login — retry up to 5 times with exponential backoff.
+  // HF Space egress to Discord Gateway can be flaky on first boot; subsequent
+  // attempts usually succeed.
+  const MAX_LOGIN_ATTEMPTS = 5;
+  let loginOk = false;
+  for (let attempt = 1; attempt <= MAX_LOGIN_ATTEMPTS; attempt++) {
+    try {
+      log.info(`Discord login attempt ${attempt}/${MAX_LOGIN_ATTEMPTS}`);
+      await client.login(token);
+      loginOk = true;
+      break;
+    } catch (e) {
+      log.error(`Login attempt ${attempt} failed`, { error: (e as Error).message });
+      if (attempt < MAX_LOGIN_ATTEMPTS) {
+        const backoffMs = Math.min(30000, 2000 * Math.pow(2, attempt - 1));
+        log.info(`Retrying in ${backoffMs}ms...`);
+        await new Promise(r => setTimeout(r, backoffMs));
+      }
+    }
+  }
+  if (!loginOk) {
+    log.error(`All ${MAX_LOGIN_ATTEMPTS} login attempts failed, exiting`);
     process.exit(4);
   }
 }
