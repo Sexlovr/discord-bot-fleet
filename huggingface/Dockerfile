@@ -113,24 +113,21 @@ fi
 
 if [ "$NEEDS_INSTALL" = "1" ]; then
   log "Installing dependencies (this may take a minute on first boot)..."
-  npm install --no-audit --no-fund 2>&1 | tail -5
-  # Install typescript explicitly. It's in devDependencies, which `npm install`
-  # without `--include=dev` skips. Without this, `npx tsc` falls back to a
-  # deprecated stub that prints "this is not the tsc you are looking for"
-  # and exits 0 without compiling anything.
-  if ! npm ls typescript >/dev/null 2>&1; then
-    log "Installing typescript explicitly (devDependencies not installed in prod mode)..."
-    npm install --no-save --no-audit --no-fund typescript@^5.6.3 2>&1 | tail -3
-  fi
+  # Use --include=dev so devDependencies (typescript, @types/*) are also installed.
+  # NODE_ENV=production would otherwise skip them.
+  npm install --include=dev --no-audit --no-fund 2>&1 | tail -5
   log "Dependencies installed."
 else
   log "Dependencies up to date (node_modules present, package.json unchanged)."
-  # Still ensure typescript is present even on cached boots
-  if ! npm ls typescript >/dev/null 2>&1; then
-    log "Installing typescript explicitly..."
-    npm install --no-save --no-audit --no-fund typescript@^5.6.3 2>&1 | tail -3
-  fi
 fi
+
+# Always ensure typescript is actually installed (not just listed in package.json).
+# `npm ls typescript` returns 0 even when not installed, so check the binary directly.
+if ! npx --no-install tsc --version >/dev/null 2>&1; then
+  log "typescript binary not found, installing explicitly..."
+  npm install --no-save --no-audit --no-fund typescript@^5.6.3 2>&1 | tail -3
+fi
+log "typescript is available: $(npx --no-install tsc --version 2>&1)"
 
 # ─── Build TypeScript ──────────────────────────────────────────────────
 log "Compiling TypeScript..."
@@ -138,6 +135,12 @@ npx tsc 2>&1 | tail -5 || {
   err "TypeScript compilation failed."
   exit 3
 }
+# Hard fail if dist/server.js doesn't exist (catches silent tsc stub issues)
+if [ ! -f dist/server.js ]; then
+  err "dist/server.js missing after tsc. typescript may not have actually compiled."
+  err "Run 'npx tsc --version' to check."
+  exit 3
+fi
 log "Build complete."
 
 # ─── Start the server ─────────────────────────────────────────────────
