@@ -31,7 +31,8 @@ class DiscordRestClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            timeout = aiohttp.ClientTimeout(total=30, connect=10)
+            # Bumped timeouts — HF Space egress to Discord can be slow on first request
+            timeout = aiohttp.ClientTimeout(total=60, connect=30, sock_read=30)
             self._session = aiohttp.ClientSession(
                 timeout=timeout,
                 headers={

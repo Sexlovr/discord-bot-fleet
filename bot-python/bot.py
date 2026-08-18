@@ -108,12 +108,20 @@ async def main():
         log.error('Failed to decrypt token', error=str(e))
         sys.exit(3)
 
-    # Validate token + fetch bot user ID
+    # Validate token + fetch bot user ID (with retry — HF Space egress to discord.com can be slow on first request)
     rest = DiscordRestClient(token, bot_id, log)
     log.info('Validating Discord token...')
-    user_info = await rest.validate_token()
-    if '_error' in user_info:
-        log.error('Token validation failed', error=user_info.get('_error'), body=user_info.get('_body', '')[:200])
+    user_info = None
+    for attempt in range(1, 4):
+        user_info = await rest.validate_token()
+        if '_error' not in user_info:
+            break
+        log.warn(f'Token validation attempt {attempt}/3 failed', error=user_info.get('_error'))
+        if attempt < 3:
+            await asyncio.sleep(2 * attempt)
+    if user_info is None or '_error' in user_info:
+        log.error('Token validation failed after 3 attempts', error=user_info.get('_error') if user_info else 'no response')
+        await rest.close()
         sys.exit(4)
 
     discord_user_id = user_info.get('id')
