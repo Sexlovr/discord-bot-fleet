@@ -377,24 +377,32 @@ async def main():
         log.warn('Hit MAX_TOOL_ROUNDS, giving up without final reply')
 
     # ─── Polling loop ────────────────────────────────────────────────────
-    POLL_INTERVAL_SEC = 1.5
+    # Interval must be > (channels × pacing) so we don't have overlapping polls.
+    # 19 channels × 0.2s pacing = 3.8s, so interval=5s gives breathing room.
+    POLL_INTERVAL_SEC = 5.0
     channel_ids = config.get('channel_ids') or []
 
     log.info(f'Polling {len(channel_ids)} channels every {POLL_INTERVAL_SEC}s')
 
-    # Bootstrap: get the most recent message ID per channel so we only process NEW messages
-    log.info('Bootstrapping channel state...')
+    # Bootstrap: get the most recent message ID per channel so we only process NEW messages.
+    # Do this SEQUENTIALLY (not in parallel) to avoid hitting Discord's burst rate limit
+    # and overwhelming the CF Worker with simultaneous TLS handshakes.
+    log.info('Bootstrapping channel state (sequential to avoid burst rate limit)...')
     for cid in channel_ids:
-        try:
-            messages = await rest.get_recent_messages(cid, limit=1)
-            if messages:
-                last_seen_message_id[cid] = messages[-1].get('id', '')
-                log.debug(f'Channel {cid}: last seen message {last_seen_message_id[cid]}')
-            else:
-                last_seen_message_id[cid] = '0'
-        except Exception as e:
-            log.warn(f'Failed to bootstrap channel {cid}', error=str(e))
-            last_seen_message_id[cid] = '0'
+        for attempt in range(3):
+            try:
+                messages = await rest.get_recent_messages(cid, limit=1)
+                if messages:
+                    last_seen_message_id[cid] = messages[-1].get('id', '')
+                    log.debug(f'Channel {cid}: last seen message {last_seen_message_id[cid]}')
+                else:
+                    last_seen_message_id[cid] = ''  # empty channel
+                break
+            except Exception as e:
+                log.warn(f'Bootstrap channel {cid} attempt {attempt+1}/3 failed', error=str(e)[:200])
+                last_seen_message_id[cid] = ''
+                await asyncio.sleep(2)
+        await asyncio.sleep(0.5)  # gentle pacing between channels (was 0.3, bumped to 0.5)
     log.info('Bootstrap complete')
 
     # Optional: send "online" message — comment out if you don't want this
@@ -405,7 +413,23 @@ async def main():
         while True:
             for cid in channel_ids:
                 try:
-                    after_id = last_seen_message_id.get(cid, '0')
+                    after_id = last_seen_message_id.get(cid, '')
+                    # If we've never seen this channel, leave `after` empty — Discord returns
+                    # the most recent messages without filtering. Use limit=1 to seed cursor.
+                    if not after_id:
+                        messages = await rest.get_recent_messages(cid, limit=1)
+                        if messages:
+                            last_seen_message_id[cid] = messages[-1].get('id', '')
+                        else:
+                            last_seen_message_id[cid] = 'empty'  # sentinel
+                        continue
+                    if after_id == 'empty':
+                        # Channel was empty last time — try again with limit=1
+                        messages = await rest.get_recent_messages(cid, limit=1)
+                        if messages:
+                            last_seen_message_id[cid] = messages[-1].get('id', '')
+                        continue
+                    # Normal poll: get new messages since last seen
                     messages = await rest.get_recent_messages(cid, limit=25, after=after_id)
                     if not messages:
                         continue
@@ -419,6 +443,9 @@ async def main():
                             log.error('Error handling message', error=str(e), message_id=msg.get('id', '?'))
                 except Exception as e:
                     log.error(f'Polling channel {cid} failed', error=str(e))
+                # Gentle pacing between channels — 0.2s each = 3.8s total for 19 channels
+                # which fits within the 1.5s poll interval × 2-3 cycles
+                await asyncio.sleep(0.2)
             await asyncio.sleep(POLL_INTERVAL_SEC)
     except asyncio.CancelledError:
         log.info('Polling cancelled, shutting down')
