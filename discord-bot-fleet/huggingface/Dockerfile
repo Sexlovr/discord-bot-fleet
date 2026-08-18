@@ -28,10 +28,13 @@
 
 FROM node:20-slim
 
-# Install git + ca-certs for HTTPS clone
+# Install git + ca-certs + Python 3 + pip + minimal Python deps
+# (No discord.py needed — we use REST polling instead of WebSocket gateway)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        git ca-certificates bash \
-    && rm -rf /var/lib/apt/lists/*
+        git ca-certificates bash python3 python3-pip python3-venv \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m pip install --no-cache-dir --break-system-packages \
+        openai>=1.50.0 aiohttp>=3.9.0 cryptography>=42.0.0
 
 # Bake a global git safe.directory exception. Without this, git refuses to
 # operate on /data/repo because HF mounts /data from a different UID.
@@ -121,7 +124,7 @@ fi
 
 if [ "$NEEDS_CLEAN_INSTALL" = "1" ]; then
   log "package.json changed or modules corrupted — clean reinstall..."
-  rm -rf node_modules
+  rm -rf node_modules package-lock.json
 fi
 if [ "$NEEDS_INSTALL" = "1" ]; then
   log "Installing dependencies (this may take a minute on first boot)..."
