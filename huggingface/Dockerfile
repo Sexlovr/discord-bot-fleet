@@ -28,12 +28,13 @@
 
 FROM node:20-slim
 
-# Install git + ca-certs + Python 3 + pip
+# Install git + ca-certs + Python 3 + pip + minimal Python deps
+# (No discord.py needed — we use REST polling instead of WebSocket gateway)
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates bash python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m pip install --no-cache-dir --break-system-packages \
-        discord.py>=2.4.0 openai>=1.50.0 aiohttp>=3.9.0 cryptography>=42.0.0
+        openai>=1.50.0 aiohttp>=3.9.0 cryptography>=42.0.0
 
 # Bake a global git safe.directory exception. Without this, git refuses to
 # operate on /data/repo because HF mounts /data from a different UID.
