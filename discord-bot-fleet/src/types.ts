@@ -8,6 +8,7 @@ export interface ToolConfig {
   memory: boolean;
   schedule_reminder: boolean;
   react_to_message: boolean;
+  summon_bot: boolean; // bot-to-bot delegation
 }
 
 export interface LLMConfig {
@@ -34,6 +35,8 @@ export interface BotConfig {
   token_enc: string;   // encrypted Discord bot token
   guild_id: string;   // Discord server ID
   channel_ids: string[]; // channels where bot is active (empty = all visible)
+  discord_user_id?: string; // populated after first login (cached, not secret)
+  delegated_bots: string[]; // IDs of other bots in the fleet this bot can summon
   status: 'stopped' | 'running' | 'error';
   created_at: number;
   updated_at: number;
@@ -50,6 +53,7 @@ export const DEFAULT_TOOLS: ToolConfig = {
   memory: true,
   schedule_reminder: true,
   react_to_message: true,
+  summon_bot: false, // off by default — enable per-bot when delegation is set up
 };
 
 export const DEFAULT_GATING: GatingConfig = {
@@ -75,6 +79,7 @@ export function makeDefaultBotConfig(partial: Partial<BotConfig>): Omit<BotConfi
     persona: partial.persona || 'You are a friendly Discord bot. Be concise and warm.',
     guild_id: partial.guild_id || '',
     channel_ids: partial.channel_ids || [],
+    delegated_bots: partial.delegated_bots || [],
     llm: { ...DEFAULT_LLM, ...partial.llm },
     gating: { ...DEFAULT_GATING, ...partial.gating },
     tools: { ...DEFAULT_TOOLS, ...partial.tools },

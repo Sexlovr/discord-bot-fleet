@@ -129,6 +129,7 @@ function renderBots() {
       <div class="space-y-1 text-xs text-gray-400 mb-3">
         <div>Model: <span class="mono text-gray-300">${escapeHtml(b.llm.model || '—')}</span></div>
         <div>Token: <span class="mono text-gray-300">${escapeHtml(b.token_masked || 'not set')}</span></div>
+        <div>Delegates to: <span class="mono text-gray-300">${b.delegated_bots?.length ? b.delegated_bots.length + ' bot(s)' : 'none'}</span></div>
         <div>Updated: ${timeAgo(b.updated_at)}</div>
       </div>
       <div class="flex gap-1 pt-3 border-t border-border">
@@ -185,10 +186,10 @@ function openCreate() {
   guildChannels = [];
   document.getElementById('editor-title').textContent = 'New Bot';
   renderEditor({
-    name: '', persona: '', token: '', guild_id: '', channel_ids: [],
+    name: '', persona: '', token: '', guild_id: '', channel_ids: [], delegated_bots: [],
     llm: { proxy_url: 'https://lolmaobruhhh-fap.hf.space/v1', api_key: 'FAP!', model: 'gemini-3.6-flash-high-search', temperature: 0.8, max_tokens: 500 },
     gating: { response_probability: 0.7, skip_patterns: ['^lol$', '^\\+$', '^-$', '^lmao$', '^(ok|okay|k)$'], ignore_bots: true, ignore_own_messages: true, max_context_messages: 30, cooldown_ms: 2000 },
-    tools: { web_search: true, ping_proxy: true, fetch_url: true, github_lookup: true, memory: true, schedule_reminder: true, react_to_message: true },
+    tools: { web_search: true, ping_proxy: true, fetch_url: true, github_lookup: true, memory: true, schedule_reminder: true, react_to_message: true, summon_bot: false },
   }, true);
 }
 
@@ -206,7 +207,7 @@ function editBot(id) {
 }
 
 function renderEditor(b, isNew) {
-  const toolsHtml = Object.entries(b.tools).map(([k, v]) => `
+  const toolsHtml = Object.entries(b.tools).concat([['summon_bot', b.tools.summon_bot || false]]).filter(([k], i, arr) => arr.findIndex(([k2]) => k2 === k) === i).map(([k, v]) => `
     <label class="flex items-center justify-between bg-surface2 border border-border rounded-lg px-3 py-2">
       <span class="text-sm">${k.replace(/_/g, ' ')}</span>
       <span class="switch">
@@ -321,6 +322,23 @@ function renderEditor(b, isNew) {
     </div>
 
     <div class="border-t border-border pt-5">
+      <h3 class="text-sm font-semibold mb-3">Bot-to-bot delegation</h3>
+      <p class="text-xs text-gray-500 mb-3">Pick which other bots in this fleet this bot is allowed to summon via the <code class="text-primary">summon_bot</code> tool. The target bot must have been started at least once so we know its Discord user ID. Target bots must also be configured to respond to @mentions from this bot.</p>
+      <div id="delegated-bots-list" class="space-y-1 max-h-48 overflow-y-auto bg-surface2 border border-border rounded-lg p-2">
+        ${bots.filter(x => x.id !== (editingBot?.id || '')).length === 0
+          ? '<span class="text-xs text-gray-500">No other bots in the fleet yet. Create another bot first.</span>'
+          : bots.filter(x => x.id !== (editingBot?.id || '')).map(other => `
+            <label class="flex items-center gap-2 text-xs cursor-pointer hover:bg-surface px-2 py-1 rounded">
+              <input type="checkbox" class="delegated-cb accent-primary" value="${other.id}" ${(b.delegated_bots || []).includes(other.id) ? 'checked' : ''} ${!other.discord_user_id ? 'disabled' : ''} />
+              <span class="text-gray-300">${escapeHtml(other.name)}</span>
+              <span class="text-gray-600 mono ml-auto">${other.id}</span>
+              ${other.discord_user_id ? '' : '<span class="text-warn text-[10px]">(never started — start it first)</span>'}
+            </label>
+          `).join('')}
+      </div>
+    </div>
+
+    <div class="border-t border-border pt-5">
       <h3 class="text-sm font-semibold mb-3">Tools</h3>
       <div class="grid grid-cols-2 md:grid-cols-3 gap-2">${toolsHtml}</div>
     </div>
@@ -415,6 +433,7 @@ async function saveBot(restart) {
   const token = document.getElementById('f-token').value.trim();
   const guild_id = document.getElementById('f-guild').value.trim();
   const channel_ids = Array.from(document.querySelectorAll('.channel-cb:checked')).map(cb => cb.value);
+  const delegated_bots = Array.from(document.querySelectorAll('.delegated-cb:checked')).map(cb => cb.value);
   const proxy = document.getElementById('f-proxy').value.trim();
   const api_key = document.getElementById('f-apikey').value.trim();
   const model = document.getElementById('f-model').value.trim();
@@ -426,15 +445,15 @@ async function saveBot(restart) {
   const cooldown_ms = parseInt(document.getElementById('f-cooldown').value, 10);
   const ignore_bots = document.getElementById('f-ignorebots').checked;
   const tools = {};
-  ['web_search','ping_proxy','fetch_url','github_lookup','memory','schedule_reminder','react_to_message'].forEach(k => {
-    tools[k] = document.getElementById('tool-' + k)?.checked ?? true;
+  ['web_search','ping_proxy','fetch_url','github_lookup','memory','schedule_reminder','react_to_message','summon_bot'].forEach(k => {
+    tools[k] = document.getElementById('tool-' + k)?.checked ?? (k === 'summon_bot' ? false : true);
   });
 
   if (!name || !persona) { alert('Name and persona are required'); return; }
   if (!editingBot && !token) { alert('Token is required for new bots'); return; }
 
   const body = {
-    name, persona, guild_id, channel_ids,
+    name, persona, guild_id, channel_ids, delegated_bots,
     llm: { proxy_url: proxy, model, temperature, max_tokens, ...(api_key ? { api_key } : {}) },
     gating: { response_probability, skip_patterns, ignore_bots, ignore_own_messages: true, max_context_messages, cooldown_ms },
     tools,

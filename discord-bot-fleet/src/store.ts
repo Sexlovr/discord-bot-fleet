@@ -61,6 +61,8 @@ export function createBot(input: Partial<BotConfig> & { name: string; persona: s
     token_enc: input.token_enc,
     guild_id: input.guild_id || '',
     channel_ids: input.channel_ids || [],
+    delegated_bots: input.delegated_bots || [],
+    discord_user_id: input.discord_user_id,
     llm: input.llm,
     gating: input.gating,
     tools: input.tools,

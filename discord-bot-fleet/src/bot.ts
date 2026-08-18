@@ -8,7 +8,7 @@ import { getBotLogger, getLogBus } from './logger.js';
 import { LLMClient, type LLMMessage } from './llm.js';
 import { getEnabledTools, dispatchTool, type ToolContext } from './tools/index.js';
 import { decryptString } from './crypto.js';
-import { getBot } from './store.js';
+import { getBot, updateBot } from './store.js';
 import type { BotConfig } from './types.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -78,6 +78,68 @@ async function main() {
         log.warn('Failed to add reaction', { emoji, error: (e as Error).message });
       }
     },
+    // Bot-to-bot delegation: @mention target bot, wait for its reply
+    summonBot: async (targetBotId: string, message: string, timeoutSec: number, channelId: string): Promise<string> => {
+      const target = getBot(targetBotId);
+      if (!target) return JSON.stringify({ error: `unknown bot: ${targetBotId}` });
+      if (!target.discord_user_id) {
+        return JSON.stringify({
+          error: `target bot "${target.name}" has no Discord user ID cached`,
+          hint: 'start the target bot at least once so we learn its user ID',
+        });
+      }
+
+      const ch = client.channels.cache.get(channelId);
+      if (!ch || !ch.isTextBased || !ch.isTextBased()) {
+        return JSON.stringify({ error: `channel ${channelId} not found or not text-based` });
+      }
+      const textChannel = ch as { send: (s: string) => Promise<{ id: string }> };
+
+      // Send the @mention message
+      const mention = `<@${target.discord_user_id}> ${message}`;
+      log.info('Summoning bot', { target: target.name, target_id: targetBotId, message_preview: message.slice(0, 80) });
+      await textChannel.send(mention);
+
+      // Wait for the target bot's reply in the same channel
+      return new Promise((resolve) => {
+        const targetUserId = target.discord_user_id!;
+        let settled = false;
+
+        const cleanup = () => {
+          client.off(Events.MessageCreate, handler);
+          clearTimeout(timer);
+        };
+
+        const timer = setTimeout(() => {
+          if (settled) return;
+          settled = true;
+          cleanup();
+          log.warn('Summon timed out', { target: target.name, timeout_sec: timeoutSec });
+          resolve(JSON.stringify({
+            ok: false,
+            error: 'timeout',
+            timeout_sec: timeoutSec,
+            hint: `bot "${target.name}" did not reply within ${timeoutSec}s. Is it running? Does it respond to @mentions?`,
+          }));
+        }, timeoutSec * 1000);
+
+        const handler = (msg: { author: { id: string }; channelId: string; content: string }) => {
+          if (settled) return;
+          if (msg.author.id !== targetUserId) return;
+          if (msg.channelId !== channelId) return;
+          settled = true;
+          cleanup();
+          log.info('Summon received reply', { target: target.name, reply_preview: msg.content.slice(0, 200) });
+          resolve(JSON.stringify({
+            ok: true,
+            target_bot: target.name,
+            response: msg.content,
+          }));
+        };
+
+        client.on(Events.MessageCreate, handler);
+      });
+    },
   };
 
   // Per-channel rolling message history (in-process; resets on restart).
@@ -120,6 +182,12 @@ async function main() {
 
   client.once(Events.ClientReady, (c) => {
     log.info(`Discord client ready — logged in as ${c.user.tag}`, { username: c.user.username });
+    // Cache our own Discord user ID so other bots in the fleet can summon us
+    if (c.user.id !== configSafe.discord_user_id) {
+      updateBot(botId, { discord_user_id: c.user.id });
+      configSafe.discord_user_id = c.user.id;
+      log.info('Cached Discord user ID', { user_id: c.user.id });
+    }
   });
 
   client.on(Events.MessageCreate, async (message) => {
@@ -132,6 +200,17 @@ async function main() {
 
       // Ignore own messages (always)
       if (message.author.id === client.user?.id) return;
+
+      // Skip messages from delegated bots — they are handled by the summon_bot
+      // tool internally (we are awaiting their reply). Prevents double-responding.
+      if (message.author.bot && configSafe.delegated_bots?.length > 0) {
+        for (const targetId of configSafe.delegated_bots) {
+          const target = getBot(targetId);
+          if (target?.discord_user_id === message.author.id) {
+            return; // summon flow handles this message
+          }
+        }
+      }
 
       const content = message.content || '';
       const isBot = message.author.bot;
@@ -186,6 +265,8 @@ async function main() {
             } catch {
               log.warn('Tool call args parse failed', { raw: tc.function.arguments });
             }
+            // Inject current channel context for tools that need it (e.g. summon_bot)
+            parsedArgs._channel_id = message.channelId;
             const result = await dispatchTool(tc.function.name, parsedArgs, ctx);
             log.info('Tool result', { name: tc.function.name, result_preview: result.slice(0, 200) });
             llmMessages.push({

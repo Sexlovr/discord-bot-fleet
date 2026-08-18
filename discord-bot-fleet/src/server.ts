@@ -99,7 +99,7 @@ app.get('/api/bots', (req, res) => {
 
 app.post('/api/bots', (req, res) => {
   const {
-    name, persona, token, guild_id, channel_ids,
+    name, persona, token, guild_id, channel_ids, delegated_bots,
     llm, gating, tools,
   } = req.body || {};
 
@@ -108,7 +108,7 @@ app.post('/api/bots', (req, res) => {
   }
 
   const botConfig = createBot({
-    ...makeDefaultBotConfig({ name, persona, guild_id: guild_id || '', channel_ids: channel_ids || [] }),
+    ...makeDefaultBotConfig({ name, persona, guild_id: guild_id || '', channel_ids: channel_ids || [], delegated_bots: delegated_bots || [] }),
     token_enc: encryptString(token),
     llm: { ...DEFAULT_LLM, ...llm, api_key_enc: llm?.api_key ? encryptString(llm.api_key) : '' },
     gating: { ...DEFAULT_GATING, ...gating },

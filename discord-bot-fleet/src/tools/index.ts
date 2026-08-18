@@ -8,6 +8,7 @@ import { githubLookupTool, githubLookupHandler } from './github.js';
 import { memoryReadTool, memoryReadHandler, memoryWriteTool, memoryWriteHandler } from './memory.js';
 import { scheduleReminderTool, scheduleReminderHandler } from './schedule.js';
 import { webSearchTool, webSearchHandler } from './web_search.js';
+import { summonBotTool, summonBotHandler } from './summon_bot.js';
 import type { BotConfig } from '../types.js';
 
 export interface ToolContext {
@@ -15,6 +16,8 @@ export interface ToolContext {
   botUserMention: (userId?: string) => string;
   sendChannelMessage: (channelId: string, content: string) => Promise<void>;
   addReaction: (channelId: string, messageId: string, emoji: string) => Promise<void>;
+  // Bot-to-bot delegation. Sends an @mention in the current channel, waits for reply.
+  summonBot?: (targetBotId: string, message: string, timeoutSec: number, channelId: string) => Promise<string>;
 }
 
 export interface ToolDef {
@@ -32,6 +35,7 @@ const ALL_TOOLS: Record<string, ToolDef> = {
   memory_write:  { schema: memoryWriteTool,   handler: memoryWriteHandler },
   schedule_reminder: { schema: scheduleReminderTool, handler: scheduleReminderHandler },
   web_search:    { schema: webSearchTool,    handler: webSearchHandler },
+  summon_bot:    { schema: summonBotTool,    handler: summonBotHandler },
 };
 
 // Build the tool list for a bot based on its config toggles.
@@ -46,6 +50,9 @@ export function getEnabledTools(config: BotConfig): LLMTool[] {
   }
   if (config.tools.schedule_reminder)  enabled.push(ALL_TOOLS.schedule_reminder.schema);
   if (config.tools.web_search)         enabled.push(ALL_TOOLS.web_search.schema);
+  if (config.tools.summon_bot && config.delegated_bots.length > 0) {
+    enabled.push(ALL_TOOLS.summon_bot.schema);
+  }
   return enabled;
 }
 
