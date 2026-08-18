@@ -11,7 +11,7 @@ import type { BotConfig } from './types.js';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const BOT_SCRIPT = join(__dirname, 'bot.js'); // assumes compiled to dist/bot.js
+const BOT_SCRIPT = join(__dirname, '..', 'bot-python', 'bot.py'); // Python runtime (HF Space can't reach Discord WS from Node)
 
 class BotManager {
   private processes = new Map<string, ChildProcess>();
@@ -32,9 +32,9 @@ class BotManager {
     const log = getBotLogger(botId);
     log.info('Starting bot process', { script: BOT_SCRIPT });
 
-    const child = spawn('node', [BOT_SCRIPT, `--id=${botId}`], {
+    const child = spawn('python3', [BOT_SCRIPT, `--id=${botId}`], {
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env },
+      env: { ...process.env, PYTHONUNBUFFERED: '1' },
     });
 
     const promise = new Promise<void>((resolve, reject) => {
