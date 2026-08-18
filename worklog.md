@@ -114,3 +114,48 @@ Stage Summary:
 - All HIGH-severity bugs fixed and tested
 - All MEDIUM-severity bugs fixed
 - Production-ready for HF Space deploy
+
+---
+Task ID: 4
+Agent: main (super-z)
+Task: Live deploy to GitHub (private repo) + HuggingFace Space using user-provided credentials
+
+Work Log:
+- Cleaned up local artifacts (data/.master-key, data/bots.json, data/logs, data/memory)
+- Updated .gitignore to also exclude data/.master-key and data/memory/
+- Created private GitHub repo "Sexlovr/discord-bot-fleet" via API using user's PAT
+- Initialized git, added all source files (28 files), committed with detailed message, pushed to GitHub main
+- Verified GitHub repo content via API (latest commit 12fd6cc)
+- Listed current HF Space files (3 files: .gitattributes, Dockerfile, README.md — original templates)
+- Generated strong credentials:
+  - ADMIN_PASSWORD: kr36qWzV3xeyOsqDlMdJcQNl (24 chars, base64)
+  - MASTER_KEY: 127b4e60537c545a66f49cb307c5f3d8e56bc925398e885de72c2d98a5d3f181 (32 bytes hex)
+- Uploaded our Dockerfile + README.md via HF commit API (Dockerfile went from 669 → 6229 bytes)
+- Set 4 HF Secrets: GIT_PAT, ADMIN_PASSWORD, MASTER_KEY, LLM_API_KEY
+- Set 2 HF Variables: REPO_URL, REPO_BRANCH=main
+- Triggered factory reset restart of Space
+- First boot: RUNTIME_ERROR — git dubious ownership on /data/repo + typescript not installed
+  - Root cause 1: /data is mounted from a different UID; git refuses to operate without safe.directory exception
+  - Root cause 2: 'npm install' skips devDependencies under NODE_ENV=production; typescript not available; 'npx tsc' silently fell back to a deprecated stub that exits 0 without compiling
+- Fixed root cause 1: added 'RUN git config --global --add safe.directory *' to Dockerfile
+- Fixed root cause 2 (first attempt): tried 'npm ls typescript' check — WRONG, returns 0 even when not installed
+- Fixed root cause 2 (second attempt): use 'npx --no-install tsc --version' to actually verify the binary; use 'npm install --include=dev' on main install so devDeps aren't skipped; added hard fail if dist/server.js doesn't exist after tsc
+- Pushed fixes to GitHub (commits bf0ffb3 + e5264c4)
+- Re-uploaded fixed Dockerfile to HF Space (7352 bytes)
+- Factory-reset restarted Space again — status progressed BUILDING → APP_STARTING → RUNNING (took ~3 min)
+- Verified live deployment:
+  - HTTP 200 on root
+  - Login endpoint returns valid session token with correct password
+  - Login rejects wrong password
+  - GET /api/bots returns empty bots array (fresh install)
+  - POST /api/llm/ping against user's proxy returns: status=online, latency=2452ms, 55 models available, test response "Hello."
+
+Stage Summary:
+- LIVE URL: https://rhbstntsmnde-ernie.hf.space
+- Login: password "kr36qWzV3xeyOsqDlMdJcQNl"
+- GitHub repo: https://github.com/Sexlovr/discord-bot-fleet (private, latest commit e5264c4)
+- HF Space: rhbstntsmnde/ernie (Docker SDK, free CPU tier, 16GB RAM)
+- All HF Secrets + Variables configured
+- Bootstrap Dockerfile proven working: clones from GitHub, compiles TS, runs server
+- LLM proxy integration verified working from HF Space
+- User can now log in to the panel, create their first bot, and start it

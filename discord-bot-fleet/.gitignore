@@ -1,8 +1,10 @@
 node_modules/
 dist/
 data/*.json
-!data/.gitkeep
+data/.master-key
 data/logs/
+data/memory/
+!data/.gitkeep
 .env
 .env.local
 *.log

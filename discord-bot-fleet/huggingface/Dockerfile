@@ -33,6 +33,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates bash \
     && rm -rf /var/lib/apt/lists/*
 
+# Bake a global git safe.directory exception. Without this, git refuses to
+# operate on /data/repo because HF mounts /data from a different UID.
+# See: https://git-scm.com/docs/git-config/#Documentation/git-config.txt-safedirectory
+RUN git config --global --add safe.directory '*'
+
 WORKDIR /app
 
 # Write the entrypoint script inline using a BuildKit heredoc.
@@ -108,11 +113,21 @@ fi
 
 if [ "$NEEDS_INSTALL" = "1" ]; then
   log "Installing dependencies (this may take a minute on first boot)..."
-  npm install --no-audit --no-fund 2>&1 | tail -5
+  # Use --include=dev so devDependencies (typescript, @types/*) are also installed.
+  # NODE_ENV=production would otherwise skip them.
+  npm install --include=dev --no-audit --no-fund 2>&1 | tail -5
   log "Dependencies installed."
 else
   log "Dependencies up to date (node_modules present, package.json unchanged)."
 fi
+
+# Always ensure typescript is actually installed (not just listed in package.json).
+# `npm ls typescript` returns 0 even when not installed, so check the binary directly.
+if ! npx --no-install tsc --version >/dev/null 2>&1; then
+  log "typescript binary not found, installing explicitly..."
+  npm install --no-save --no-audit --no-fund typescript@^5.6.3 2>&1 | tail -3
+fi
+log "typescript is available: $(npx --no-install tsc --version 2>&1)"
 
 # ─── Build TypeScript ──────────────────────────────────────────────────
 log "Compiling TypeScript..."
@@ -120,6 +135,12 @@ npx tsc 2>&1 | tail -5 || {
   err "TypeScript compilation failed."
   exit 3
 }
+# Hard fail if dist/server.js doesn't exist (catches silent tsc stub issues)
+if [ ! -f dist/server.js ]; then
+  err "dist/server.js missing after tsc. typescript may not have actually compiled."
+  err "Run 'npx tsc --version' to check."
+  exit 3
+fi
 log "Build complete."
 
 # ─── Start the server ─────────────────────────────────────────────────
