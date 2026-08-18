@@ -103,14 +103,26 @@ fi
 log "Working directory: $REPO_DIR"
 
 NEEDS_INSTALL=0
+NEEDS_CLEAN_INSTALL=0
 if [ ! -d node_modules ]; then
   NEEDS_INSTALL=1
 elif [ ! -f node_modules/.package-lock.json ]; then
   NEEDS_INSTALL=1
 elif [ package.json -nt node_modules/.package-lock.json ]; then
+  # package.json changed since last install — do a clean install to avoid
+  # leftover/corrupted modules from a previous (different) dependency set
+  NEEDS_CLEAN_INSTALL=1
+  NEEDS_INSTALL=1
+elif ! [ -f node_modules/openai/pagination.mjs ]; then
+  # Sanity check: openai package was previously not fully installed
+  NEEDS_CLEAN_INSTALL=1
   NEEDS_INSTALL=1
 fi
 
+if [ "$NEEDS_CLEAN_INSTALL" = "1" ]; then
+  log "package.json changed or modules corrupted — clean reinstall..."
+  rm -rf node_modules
+fi
 if [ "$NEEDS_INSTALL" = "1" ]; then
   log "Installing dependencies (this may take a minute on first boot)..."
   # Use --include=dev so devDependencies (typescript, @types/*) are also installed.
