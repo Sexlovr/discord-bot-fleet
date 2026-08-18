@@ -11,6 +11,43 @@ export interface ToolConfig {
   summon_bot: boolean; // bot-to-bot delegation
 }
 
+// ─── Multi-provider LLM support ──────────────────────────────────────────
+// A bot can have multiple LLM providers. They're tried in priority order
+// (lower priority = tried first). If a provider fails (timeout, 5xx, network
+// error), the next one is tried. This way if your primary proxy is down,
+// the bot automatically falls back to z.ai SDK or another proxy.
+//
+// Provider types:
+//   - 'openai'    : OpenAI-compatible REST API (your lolmaobruhhh proxy, OpenAI, etc.)
+//   - 'zai'       : z.ai SDK (uses z-ai-web-dev-sdk, no API key needed)
+//
+// For 'openai' providers: fill proxy_url + api_key_enc + model + temperature + max_tokens
+// For 'zai' providers: only model + temperature + max_tokens needed
+//                    (proxy_url + api_key are ignored, SDK handles auth internally)
+//                    Optional: zai_thinking = 'enabled' | 'disabled' (chain-of-thought)
+
+export type ProviderType = 'openai' | 'zai';
+
+export interface LLMProvider {
+  id: string;          // nanoid, used as identifier
+  name: string;        // display name (e.g. "Primary proxy", "z.ai fallback")
+  type: ProviderType;
+  priority: number;    // 1 = highest priority (tried first), 2 = next, etc.
+  enabled: boolean;    // can be toggled off without deleting
+
+  // OpenAI-compatible fields (ignored for 'zai' type)
+  proxy_url: string;
+  api_key_enc: string; // encrypted (empty for 'zai' type)
+  model: string;
+  temperature: number;
+  max_tokens: number;
+
+  // z.ai-specific (ignored for 'openai' type)
+  zai_thinking?: 'enabled' | 'disabled';  // chain-of-thought, default 'disabled'
+}
+
+// Backward-compat: a single LLMConfig (old format) is auto-converted to a
+// single-provider list at runtime. New bots always use providers[].
 export interface LLMConfig {
   proxy_url: string;
   api_key_enc: string; // encrypted
@@ -40,7 +77,8 @@ export interface BotConfig {
   status: 'stopped' | 'running' | 'error';
   created_at: number;
   updated_at: number;
-  llm: LLMConfig;
+  llm: LLMConfig;        // backward compat — single provider config
+  providers?: LLMProvider[]; // new multi-provider list (preferred over llm)
   gating: GatingConfig;
   tools: ToolConfig;
 }
@@ -70,8 +108,42 @@ export const DEFAULT_LLM: LLMConfig = {
   api_key_enc: '', // filled at runtime from env LLM_API_KEY if empty
   model: 'gemini-3.6-flash-high-search',
   temperature: 0.8,
-  max_tokens: 500,
+  max_tokens: 1500, // bumped from 500 — 500 was cutting off replies
 };
+
+// Build the default single-provider list from a legacy LLMConfig.
+// Used when a bot has `llm` set but no `providers[]`.
+export function providersFromLegacy(llm: LLMConfig): LLMProvider[] {
+  return [{
+    id: 'default',
+    name: 'Default',
+    type: 'openai',
+    priority: 1,
+    enabled: true,
+    proxy_url: llm.proxy_url,
+    api_key_enc: llm.api_key_enc,
+    model: llm.model,
+    temperature: llm.temperature,
+    max_tokens: llm.max_tokens,
+  }];
+}
+
+// z.ai SDK provider preset — useful as a free fallback
+export function makeZaiProvider(priority: number, model = 'glm-4.6', max_tokens = 1500): LLMProvider {
+  return {
+    id: `zai-${priority}`,
+    name: `z.ai SDK (model: ${model})`,
+    type: 'zai',
+    priority,
+    enabled: true,
+    proxy_url: '',
+    api_key_enc: '',
+    model,
+    temperature: 0.8,
+    max_tokens,
+    zai_thinking: 'disabled',
+  };
+}
 
 export function makeDefaultBotConfig(partial: Partial<BotConfig>): Omit<BotConfig, 'id' | 'token_enc' | 'created_at' | 'updated_at' | 'status'> & Partial<Pick<BotConfig, 'id' | 'token_enc' | 'created_at' | 'updated_at' | 'status'>> {
   return {
@@ -81,6 +153,7 @@ export function makeDefaultBotConfig(partial: Partial<BotConfig>): Omit<BotConfi
     channel_ids: partial.channel_ids || [],
     delegated_bots: partial.delegated_bots || [],
     llm: { ...DEFAULT_LLM, ...partial.llm },
+    providers: partial.providers, // undefined = use legacy llm
     gating: { ...DEFAULT_GATING, ...partial.gating },
     tools: { ...DEFAULT_TOOLS, ...partial.tools },
   };

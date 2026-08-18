@@ -142,12 +142,28 @@ app.put('/api/bots/:id', (req, res) => {
     patch.token_enc = encryptString(patch.token);
     delete patch.token;
   }
-  // Handle LLM API key rotation
+  // Handle LLM API key rotation (legacy single-provider config)
   if (patch.llm && typeof (patch.llm as { api_key?: string }).api_key === 'string') {
     const apiKey = (patch.llm as { api_key?: string }).api_key;
     patch.llm = { ...bot.llm, ...patch.llm };
     if (apiKey) patch.llm.api_key_enc = encryptString(apiKey);
     delete (patch.llm as { api_key?: string }).api_key;
+  }
+  // Handle multi-provider config: encrypt any api_key fields in providers[]
+  if (patch.providers && Array.isArray(patch.providers)) {
+    // Merge with existing providers (so user can update just one field)
+    const existingById = new Map((bot.providers || []).map(p => [p.id, p]));
+    const newProviders = patch.providers.map((p: any) => {
+      const existing = existingById.get(p.id) || {};
+      const merged = { ...existing, ...p };
+      // If api_key (plaintext) is provided, encrypt it
+      if (typeof merged.api_key === 'string') {
+        merged.api_key_enc = merged.api_key ? encryptString(merged.api_key) : '';
+        delete merged.api_key;
+      }
+      return merged;
+    });
+    patch.providers = newProviders;
   }
   // Never allow status updates through this endpoint (use start/stop)
   delete patch.status;
@@ -156,11 +172,17 @@ app.put('/api/bots/:id', (req, res) => {
 
   const updated = updateBot(id, patch);
   getBotLogger(id).info('Bot config updated via panel');
+  // Mask any provider api_key_enc fields in response
+  const maskedProviders = (updated.providers || []).map((p: any) => {
+    const { api_key_enc, ...rest } = p;
+    return { ...rest, api_key_enc: undefined, api_key_masked: api_key_enc ? 'set' : 'unset' };
+  });
   res.json({
     ...updated,
     token_enc: undefined,
     token_masked: maskTokenSafe(updated.token_enc),
     llm: { ...updated.llm, api_key_enc: undefined },
+    providers: maskedProviders,
   });
 });
 
