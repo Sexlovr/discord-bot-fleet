@@ -110,6 +110,10 @@ async def main():
 
     # Validate token + fetch bot user ID (with retry — HF Space egress to discord.com can be slow on first request)
     rest = DiscordRestClient(token, bot_id, log)
+    if os.environ.get('DISCORD_PROXY_URL'):
+        log.info(f'Routing Discord traffic through proxy: {os.environ["DISCORD_PROXY_URL"]}')
+    else:
+        log.info('Direct Discord connection (no proxy — may fail on HF Space)')
     log.info('Validating Discord token...')
     user_info = None
     for attempt in range(1, 4):
