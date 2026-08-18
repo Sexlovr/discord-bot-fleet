@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Discord Bot Fleet</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      darkMode: 'class',
+      theme: {
+        extend: {
+          colors: {
+            bg: '#0a0a0a',
+            surface: '#141414',
+            surface2: '#1a1a1a',
+            border: '#262626',
+            primary: '#a855f7',
+            primary_hover: '#9333ea',
+            success: '#22c55e',
+            warn: '#f59e0b',
+            danger: '#ef4444',
+          },
+        },
+      },
+    };
+  </script>
+  <style>
+    body { background: #0a0a0a; color: #e5e5e5; }
+    * { font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; }
+    .mono { font-family: ui-monospace, "SF Mono", Monaco, Consolas, monospace; }
+    .log-line { white-space: pre-wrap; word-break: break-all; }
+    .log-debug { color: #6b7280; }
+    .log-info { color: #e5e5e5; }
+    .log-warn { color: #f59e0b; }
+    .log-error { color: #ef4444; }
+    .pulse-dot {
+      display: inline-block; width: 8px; height: 8px; border-radius: 50%;
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.4; }
+    }
+    .pulse-running { background: #22c55e; }
+    .pulse-stopped { background: #6b7280; animation: none; }
+    .pulse-error { background: #ef4444; }
+    textarea { resize: vertical; }
+    /* Hide number input arrows */
+    input[type=number]::-webkit-inner-spin-button,
+    input[type=number]::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+    input[type=number] { -moz-appearance: textfield; }
+    .switch { position: relative; display: inline-block; width: 36px; height: 20px; }
+    .switch input { opacity: 0; width: 0; height: 0; }
+    .slider { position: absolute; cursor: pointer; inset: 0; background: #404040; transition: .3s; border-radius: 20px; }
+    .slider:before { position: absolute; content: ""; height: 14px; width: 14px; left: 3px; bottom: 3px; background: white; transition: .3s; border-radius: 50%; }
+    input:checked + .slider { background: #a855f7; }
+    input:checked + .slider:before { transform: translateX(16px); }
+  </style>
+</head>
+<body class="min-h-screen">
+  <div id="app"></div>
+
+  <!-- Login screen -->
+  <div id="login" class="hidden min-h-screen flex items-center justify-center px-4">
+    <div class="bg-surface border border-border rounded-2xl p-8 w-full max-w-md shadow-2xl">
+      <div class="flex items-center gap-3 mb-6">
+        <div class="w-10 h-10 rounded-xl bg-primary/20 flex items-center justify-center text-xl">🤖</div>
+        <div>
+          <h1 class="text-xl font-semibold">Bot Fleet</h1>
+          <p class="text-xs text-gray-500">Multi-bot Discord control panel</p>
+        </div>
+      </div>
+      <form id="login-form" class="space-y-4">
+        <div>
+          <label class="block text-xs text-gray-400 mb-1">Admin password</label>
+          <input id="login-password" type="password" required autofocus
+            class="w-full bg-surface2 border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary" />
+        </div>
+        <button type="submit" class="w-full bg-primary hover:bg-primary_hover text-white rounded-lg py-2 text-sm font-medium transition">
+          Sign in
+        </button>
+        <div id="login-error" class="text-xs text-danger hidden"></div>
+      </form>
+    </div>
+  </div>
+
+  <!-- Main app -->
+  <div id="main" class="hidden min-h-screen">
+    <!-- Top bar -->
+    <header class="border-b border-border bg-surface sticky top-0 z-20">
+      <div class="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+        <div class="flex items-center gap-3">
+          <div class="w-8 h-8 rounded-lg bg-primary/20 flex items-center justify-center text-lg">🤖</div>
+          <div>
+            <div class="font-semibold text-sm">Bot Fleet</div>
+            <div class="text-xs text-gray-500" id="status-summary">Loading…</div>
+          </div>
+        </div>
+        <div class="flex items-center gap-2">
+          <button onclick="openCreate()" class="bg-primary hover:bg-primary_hover text-white text-sm px-3 py-1.5 rounded-lg transition">+ New Bot</button>
+          <button onclick="logout()" class="text-xs text-gray-400 hover:text-gray-200 px-2 py-1">Sign out</button>
+        </div>
+      </div>
+    </header>
+
+    <main class="max-w-7xl mx-auto px-4 py-6">
+      <!-- Tabs -->
+      <div class="flex gap-1 mb-4 border-b border-border">
+        <button id="tab-bots" onclick="switchTab('bots')" class="px-4 py-2 text-sm border-b-2 border-primary text-white">Bots</button>
+        <button id="tab-tools" onclick="switchTab('tools')" class="px-4 py-2 text-sm border-b-2 border-transparent text-gray-400 hover:text-gray-200">LLM Proxies</button>
+        <button id="tab-logs" onclick="switchTab('logs')" class="px-4 py-2 text-sm border-b-2 border-transparent text-gray-400 hover:text-gray-200">Live Logs</button>
+      </div>
+
+      <!-- Bots tab -->
+      <div id="tab-content-bots">
+        <div id="bots-list" class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4"></div>
+        <div id="bots-empty" class="text-center py-16 text-gray-500">
+          <div class="text-5xl mb-3">🌸</div>
+          <p class="text-sm">No bots yet. Click "+ New Bot" to create one.</p>
+        </div>
+      </div>
+
+      <!-- LLM proxy tester tab -->
+      <div id="tab-content-tools" class="hidden">
+        <div class="bg-surface border border-border rounded-2xl p-6 max-w-2xl">
+          <h2 class="font-semibold mb-1">LLM Proxy Tester</h2>
+          <p class="text-xs text-gray-500 mb-4">Health-check any OpenAI-compatible proxy + model. Used by your bots via the <code class="text-primary">ping_ai_proxy</code> tool.</p>
+          <div class="space-y-3">
+            <div>
+              <label class="block text-xs text-gray-400 mb-1">Proxy URL</label>
+              <input id="ping-url" type="text" value="https://lolmaobruhhh-fap.hf.space/v1" class="w-full bg-surface2 border border-border rounded-lg px-3 py-2 text-sm mono" />
+            </div>
+            <div class="grid grid-cols-2 gap-3">
+              <div>
+                <label class="block text-xs text-gray-400 mb-1">API key</label>
+                <input id="ping-key" type="text" value="FAP!" class="w-full bg-surface2 border border-border rounded-lg px-3 py-2 text-sm mono" />
+              </div>
+              <div>
+                <label class="block text-xs text-gray-400 mb-1">Model (optional)</label>
+                <input id="ping-model" type="text" value="gemini-3.6-flash-high-search" class="w-full bg-surface2 border border-border rounded-lg px-3 py-2 text-sm mono" />
+              </div>
+            </div>
+            <button onclick="pingProxy()" class="bg-primary hover:bg-primary_hover text-white text-sm px-4 py-2 rounded-lg">Ping</button>
+            <pre id="ping-result" class="bg-surface2 border border-border rounded-lg p-3 text-xs mono whitespace-pre-wrap min-h-[60px]"></pre>
+          </div>
+        </div>
+      </div>
+
+      <!-- Logs tab -->
+      <div id="tab-content-logs" class="hidden">
+        <div class="bg-surface border border-border rounded-2xl p-4">
+          <div class="flex items-center justify-between mb-3">
+            <div class="flex items-center gap-2">
+              <select id="logs-bot-filter" onchange="setLogFilter()" class="bg-surface2 border border-border rounded-lg px-3 py-1.5 text-sm">
+                <option value="">All bots</option>
+              </select>
+              <span id="logs-status" class="text-xs text-gray-500">—</span>
+            </div>
+            <button onclick="clearLogs()" class="text-xs text-gray-400 hover:text-gray-200">Clear view</button>
+          </div>
+          <div id="logs-output" class="bg-black/40 border border-border rounded-lg p-3 h-[600px] overflow-y-auto mono text-xs space-y-0.5"></div>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <!-- Bot editor modal -->
+  <div id="bot-editor" class="hidden fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4 overflow-y-auto">
+    <div class="bg-surface border border-border rounded-2xl w-full max-w-3xl my-8 max-h-[90vh] overflow-y-auto">
+      <div class="px-6 py-4 border-b border-border flex items-center justify-between sticky top-0 bg-surface z-10">
+        <h2 id="editor-title" class="font-semibold">New Bot</h2>
+        <button onclick="closeEditor()" class="text-gray-400 hover:text-white text-xl">×</button>
+      </div>
+      <div class="p-6 space-y-5" id="editor-body"></div>
+    </div>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>
