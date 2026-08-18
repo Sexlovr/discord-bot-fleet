@@ -34,7 +34,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         git ca-certificates bash python3 python3-pip python3-venv \
     && rm -rf /var/lib/apt/lists/* \
     && python3 -m pip install --no-cache-dir --break-system-packages \
-        openai>=1.50.0 aiohttp>=3.9.0 cryptography>=42.0.0
+        openai>=1.50.0 aiohttp>=3.9.0 cryptography>=42.0.0 curl_cffi>=0.7.0
 
 # Bake a global git safe.directory exception. Without this, git refuses to
 # operate on /data/repo because HF mounts /data from a different UID.
