@@ -57,14 +57,14 @@ class DiscordRestClient:
 
     async def _get_session(self) -> cf_requests.AsyncSession:
         if self._session is None:
-            # IMPORTANT: do NOT impersonate Chrome here.
-            # When we impersonate Chrome (JA3 + UA), Discord's Cloudflare WAF
-            # treats us as an automated browser and returns 40333 "internal
-            # network error". Using curl_cffi without impersonation lets us
-            # bypass Cloudflare's bot detection (curl_cffi uses BoringSSL
-            # which has a distinct but acceptable fingerprint) while still
-            # being treated as a "script" rather than a "browser".
+            # Use Chrome impersonation for TLS fingerprint (needed to bypass HF Space's
+            # outbound block on *.workers.dev — plain aiohttp gets TCP-dropped).
+            # IMPORTANT: do NOT use Chrome's User-Agent string. Discord's Cloudflare WAF
+            # specifically blocks the combination (Chrome JA3 + Chrome UA) → returns 40333
+            # "internal network error". Using curl_cffi's Chrome JA3 + DiscordBot UA
+            # is the magic combo that works.
             self._session = cf_requests.AsyncSession(
+                impersonate='chrome',
                 timeout=30,
                 headers={
                     'Authorization': f'Bot {self.token}',
