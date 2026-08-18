@@ -1,0 +1,71 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model Bot {
+  id             String   @id @default(cuid())
+  name           String
+  persona        String
+  tokenEnc       String   // AES-256-GCM encrypted Discord bot token
+  guildId        String   @default("")
+  channelIds     String   @default("[]") // JSON array of channel IDs as string
+  discordUserId  String?  // populated after first login
+  delegatedBots  String   @default("[]") // JSON array of bot IDs
+  status         String   @default("stopped") // stopped | running | error
+
+  // Multi-provider LLM config (JSON-encoded list of providers)
+  // Each provider: { id, name, type: 'openai'|'zai', priority, enabled, proxy_url, api_key_enc, model, temperature, max_tokens, zai_thinking? }
+  providers      String   @default("[]")
+
+  // Legacy single-provider config (kept for backward compat — preferred is providers[])
+  llmProxyUrl    String   @default("https://lolmaobruhhh-fap.hf.space/v1")
+  llmApiKeyEnc   String   @default("")
+  llmModel       String   @default("idk:gemini-3.6-flash-high-search")
+  llmTemperature Float    @default(0.85)
+  llmMaxTokens   Int      @default(1500)
+
+  // Gating config
+  responseProbability Float  @default(1.0)
+  skipPatterns        String  @default("[\"^\\\\+$\",\"^-$\",\"^(k|kk)$\"]") // JSON array of regexes
+  ignoreBots          Boolean @default(true)
+  maxContextMessages  Int     @default(30)
+  cooldownMs          Int     @default(1500)
+
+  // Tools (each toggleable)
+  toolWebSearch       Boolean @default(true)
+  toolPingProxy       Boolean @default(true)
+  toolFetchUrl        Boolean @default(true)
+  toolGithubLookup    Boolean @default(true)
+  toolMemory          Boolean @default(true)
+  toolScheduleReminder Boolean @default(true)
+  toolReactToMessage  Boolean @default(true)
+  toolSummonBot       Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([status])
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+}
+
+model AuditLog {
+  id        String   @id @default(cuid())
+  action    String   // bot_create, bot_update, bot_start, bot_stop, bot_delete, login
+  botId     String?
+  detail    String?
+  createdAt DateTime @default(now())
+}

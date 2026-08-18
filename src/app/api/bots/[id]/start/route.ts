@@ -1,0 +1,16 @@
+// Start a bot (spawns discord.js WebSocket connection)
+
+import { NextRequest, NextResponse } from 'next/server';
+import { requireAuth } from '@/lib/auth';
+import { startBot } from '@/lib/bot';
+
+export async function POST(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
+  if (!(await requireAuth())) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
+  const { id } = await params;
+  try {
+    await startBot(id);
+    return NextResponse.json({ ok: true });
+  } catch (e) {
+    return NextResponse.json({ error: (e as Error).message }, { status: 400 });
+  }
+}
