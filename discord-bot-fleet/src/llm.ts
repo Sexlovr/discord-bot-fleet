@@ -60,8 +60,12 @@ export class LLMClient {
   async chat(
     messages: LLMMessage[],
     tools: LLMTool[] = [],
-    signal?: AbortSignal
+    timeoutMs = 120000
   ): Promise<LLMResponse> {
+    // AbortController ensures we don't hang forever if the LLM proxy is slow/unresponsive
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
     const params: Record<string, unknown> = {
       model: this.model,
       messages: messages as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
@@ -71,20 +75,24 @@ export class LLMClient {
     if (tools.length > 0) {
       params.tools = tools as OpenAI.Chat.Completions.ChatCompletionTool[];
     }
-    if (signal) params.signal = signal;
+    params.signal = controller.signal;
 
-    const resp = await this.client.chat.completions.create(params as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming);
-    const choice = resp.choices[0];
-    return {
-      content: choice.message.content,
-      tool_calls: choice.message.tool_calls as LLMMessage['tool_calls'] | undefined,
-      finish_reason: choice.finish_reason,
-      usage: resp.usage ? {
-        prompt_tokens: resp.usage.prompt_tokens,
-        completion_tokens: resp.usage.completion_tokens,
-        total_tokens: resp.usage.total_tokens,
-      } : undefined,
-    };
+    try {
+      const resp = await this.client.chat.completions.create(params as unknown as OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming);
+      const choice = resp.choices[0];
+      return {
+        content: choice.message.content,
+        tool_calls: choice.message.tool_calls as LLMMessage['tool_calls'] | undefined,
+        finish_reason: choice.finish_reason,
+        usage: resp.usage ? {
+          prompt_tokens: resp.usage.prompt_tokens,
+          completion_tokens: resp.usage.completion_tokens,
+          total_tokens: resp.usage.total_tokens,
+        } : undefined,
+      };
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 
   // Test the proxy: simple "hello" request, returns latency and model list

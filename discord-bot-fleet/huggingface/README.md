@@ -43,10 +43,9 @@ cd YOUR_SPACE_NAME
 git add . && git commit -m "bootstrap" && git push
 ```
 
-The HF Space repo should contain only 3 files:
+The HF Space repo should contain only 2 files:
 - `README.md` (this file, with HF metadata frontmatter)
-- `Dockerfile`
-- `entrypoint.sh`
+- `Dockerfile` (bootstrap — uses BuildKit heredoc to embed the entrypoint script inline, so no separate `entrypoint.sh` is needed)
 
 ### 4. Set HF Secrets and Variables
 

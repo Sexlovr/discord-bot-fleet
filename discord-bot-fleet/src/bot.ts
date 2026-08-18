@@ -2,17 +2,12 @@
 // Reads its config from the store, connects to Discord, runs the main loop.
 
 import { Client, GatewayIntentBits, Partials, Events } from 'discord.js';
-import { fileURLToPath } from 'url';
-import { dirname } from 'path';
-import { getBotLogger, getLogBus } from './logger.js';
+import { getBotLogger } from './logger.js';
 import { LLMClient, type LLMMessage } from './llm.js';
 import { getEnabledTools, dispatchTool, type ToolContext } from './tools/index.js';
 import { decryptString } from './crypto.js';
 import { getBot, updateBot } from './store.js';
 import type { BotConfig } from './types.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
 
 // Parse --id arg
 function getBotIdFromArgs(): string | null {
@@ -56,15 +51,25 @@ async function main() {
     partials: [Partials.Channel, Partials.Message],
   });
 
+  // Per-(target bot + channel) in-flight summon queue.
+  // Prevents race where 2 parallel summons to same bot both get satisfied by the first reply.
+  const pendingSummons = new Map<string, { resolve: (s: string) => void; timeout: NodeJS.Timeout }>();
+
   // LLM client + tool context
   const llm = new LLMClient(configSafe);
   const ctx: ToolContext = {
     botConfig: configSafe,
     botUserMention: (userId?: string) => userId ? `<@${userId}>` : '',
     sendChannelMessage: async (channelId, content) => {
-      const ch = client.channels.cache.get(channelId);
-      if (ch && ch.isTextBased && ch.isTextBased()) {
-        await (ch as { send: (s: string) => Promise<unknown> }).send(content);
+      try {
+        const ch = client.channels.cache.get(channelId);
+        if (ch && ch.isTextBased && ch.isTextBased()) {
+          await (ch as { send: (s: string) => Promise<unknown> }).send(content);
+        } else {
+          log.warn('sendChannelMessage: channel not in cache or not text-based', { channelId });
+        }
+      } catch (e) {
+        log.error('sendChannelMessage failed', { channelId, error: (e as Error).message });
       }
     },
     addReaction: async (channelId, messageId, emoji) => {
@@ -95,25 +100,31 @@ async function main() {
       }
       const textChannel = ch as { send: (s: string) => Promise<{ id: string }> };
 
+      // Serialize per (target + channel). If another summon to same target+channel
+      // is in flight, return an error instead of risking both listeners firing
+      // on the same reply.
+      const summonKey = `${targetBotId}:${channelId}`;
+      if (pendingSummons.has(summonKey)) {
+        return JSON.stringify({
+          error: 'summon already in flight',
+          hint: `another summon to bot "${target.name}" in this channel is already waiting. Wait for it to complete or time out before summoning again.`,
+        });
+      }
+
       // Send the @mention message
       const mention = `<@${target.discord_user_id}> ${message}`;
       log.info('Summoning bot', { target: target.name, target_id: targetBotId, message_preview: message.slice(0, 80) });
       await textChannel.send(mention);
 
-      // Wait for the target bot's reply in the same channel
       return new Promise((resolve) => {
         const targetUserId = target.discord_user_id!;
         let settled = false;
 
-        const cleanup = () => {
-          client.off(Events.MessageCreate, handler);
-          clearTimeout(timer);
-        };
-
         const timer = setTimeout(() => {
           if (settled) return;
           settled = true;
-          cleanup();
+          pendingSummons.delete(summonKey);
+          client.off(Events.MessageCreate, handler);
           log.warn('Summon timed out', { target: target.name, timeout_sec: timeoutSec });
           resolve(JSON.stringify({
             ok: false,
@@ -123,12 +134,16 @@ async function main() {
           }));
         }, timeoutSec * 1000);
 
+        pendingSummons.set(summonKey, { resolve, timeout: timer });
+
         const handler = (msg: { author: { id: string }; channelId: string; content: string }) => {
           if (settled) return;
           if (msg.author.id !== targetUserId) return;
           if (msg.channelId !== channelId) return;
           settled = true;
-          cleanup();
+          pendingSummons.delete(summonKey);
+          clearTimeout(timer);
+          client.off(Events.MessageCreate, handler);
           log.info('Summon received reply', { target: target.name, reply_preview: msg.content.slice(0, 200) });
           resolve(JSON.stringify({
             ok: true,
@@ -146,6 +161,8 @@ async function main() {
   // Could be persisted to disk if we want cross-restart context.
   const channelHistory = new Map<string, LLMMessage[]>();
   const lastReplyAt = new Map<string, number>();
+  let messageContentIntentMissing = false;
+  let warningLoggedAt = 0;
 
   function getHistory(channelId: string): LLMMessage[] {
     if (!channelHistory.has(channelId)) {
@@ -214,6 +231,17 @@ async function main() {
 
       const content = message.content || '';
       const isBot = message.author.bot;
+
+      // Detect missing MessageContent intent: bot messages with empty content + no embeds
+      // are a strong signal that the intent is not enabled in the Dev Portal.
+      if (!content && !message.embeds?.length && !message.attachments?.size) {
+        if (!messageContentIntentMissing && Date.now() - warningLoggedAt > 5 * 60 * 1000) {
+          messageContentIntentMissing = true;
+          warningLoggedAt = Date.now();
+          log.error('MESSAGE CONTENT INTENT likely missing — received message with empty content. Enable it at https://discord.com/developers/applications → your app → Bot → Privileged Gateway Intents → MESSAGE CONTENT INTENT → Save Changes → Restart this bot.');
+        }
+        return;
+      }
 
       // Push to history regardless of whether we respond (so context is maintained)
       pushHistory(message.channelId, {
@@ -288,8 +316,13 @@ async function main() {
 
         // Send to Discord (handle >2000 char by splitting)
         const chunks = chunkString(reply, 2000);
-        for (const chunk of chunks) {
-          await message.channel.send(chunk);
+        try {
+          for (const chunk of chunks) {
+            await message.channel.send(chunk);
+          }
+        } catch (e) {
+          log.error('Failed to send reply to Discord', { error: (e as Error).message, channel: message.channelId });
+          return;
         }
 
         // Update history
@@ -327,12 +360,23 @@ async function main() {
   // Disconnect signal from parent (manager sends SIGTERM to stop bot)
   process.on('SIGTERM', async () => {
     log.info('Received SIGTERM, shutting down');
+    // Clean up any pending summons so they don't dangle
+    for (const [key, pending] of pendingSummons) {
+      clearTimeout(pending.timeout);
+      pending.resolve(JSON.stringify({ ok: false, error: 'shutting down' }));
+      pendingSummons.delete(key);
+    }
     client.destroy();
     setTimeout(() => process.exit(0), 500);
   });
 
   process.on('SIGINT', async () => {
     log.info('Received SIGINT, shutting down');
+    for (const [key, pending] of pendingSummons) {
+      clearTimeout(pending.timeout);
+      pending.resolve(JSON.stringify({ ok: false, error: 'shutting down' }));
+      pendingSummons.delete(key);
+    }
     client.destroy();
     setTimeout(() => process.exit(0), 500);
   });
