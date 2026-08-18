@@ -2,19 +2,38 @@
 
 This is the workaround for HF Space's blocked WS egress to Discord's gateway.
 We poll /channels/:id/messages every ~1.5s and send messages via REST.
-discord.py's WebSocket connection times out from HF Space due to Cloudflare WAF.
+
+Optional: route through a Cloudflare Worker proxy by setting DISCORD_PROXY_URL
+env var. The Worker (vertex-proxy-worker pattern) forwards to discord.com using
+Cloudflare's clean edge IPs, bypassing Discord's WAF block on HF Space egress.
 
 Rate limits: Discord allows 50 req/s per bot. With 1.5s poll interval across
 30 channels, we use ~20 req/s — well within budget.
 """
 
 import asyncio
+import os
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import quote, urlparse, urlencode
 
 import aiohttp
 
 DISCORD_API = 'https://discord.com/api/v10'
+# Optional Cloudflare Worker proxy for HF Space egress
+# Format: https://your-worker.workers.dev
+# If set, all Discord requests route through: <proxy>/proxy/<encoded-discord-url>
+DISCORD_PROXY_URL = os.environ.get('DISCORD_PROXY_URL', '').rstrip('/').strip()
+
+
+def _wrap_url(discord_path: str) -> str:
+    """If DISCORD_PROXY_URL is set, return the Worker URL that proxies the Discord URL.
+    Otherwise return the Discord URL directly.
+    """
+    target = f'{DISCORD_API}{discord_path}'
+    if not DISCORD_PROXY_URL:
+        return target
+    return f'{DISCORD_PROXY_URL}/proxy/{quote(target, safe="")}'
 
 
 class DiscordRestClient:
@@ -31,14 +50,15 @@ class DiscordRestClient:
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
-            # Bumped timeouts — HF Space egress to Discord can be slow on first request
+            # Bumped timeouts — when using CF Worker proxy, latency is a bit higher
             timeout = aiohttp.ClientTimeout(total=60, connect=30, sock_read=30)
+            headers = {
+                'Authorization': f'Bot {self.token}',
+                'User-Agent': 'DiscordBot (https://example.com, 1.0)',
+            }
             self._session = aiohttp.ClientSession(
                 timeout=timeout,
-                headers={
-                    'Authorization': f'Bot {self.token}',
-                    'User-Agent': 'DiscordBot (https://example.com, 1.0)',
-                },
+                headers=headers,
             )
         return self._session
 
@@ -47,7 +67,7 @@ class DiscordRestClient:
             await self._session.close()
 
     async def _request(self, method: str, path: str, json_body: Optional[Dict] = None, route_key: Optional[str] = None) -> Dict[str, Any]:
-        """Make a rate-limit-aware Discord REST call."""
+        """Make a rate-limit-aware Discord REST call, optionally via CF Worker."""
         async with self._lock:
             # Wait for global rate limit
             now = time.time()
@@ -67,12 +87,16 @@ class DiscordRestClient:
                     await asyncio.sleep(wait)
 
             session = await self._get_session()
-            url = f'{DISCORD_API}{path}'
+            url = _wrap_url(path)
             try:
                 async with session.request(method, url, json=json_body) as resp:
                     # Handle rate limits
                     if resp.status == 429:
-                        retry_after = float((await resp.json()).get('retry_after', 1.0))
+                        try:
+                            body = await resp.json()
+                        except Exception:
+                            body = {}
+                        retry_after = float(body.get('retry_after', 1.0))
                         if self.log:
                             self.log.warn(f'Rate limited on {method} {path}, waiting {retry_after}s')
                         if resp.headers.get('X-RateLimit-Global'):
@@ -90,7 +114,7 @@ class DiscordRestClient:
                     if resp.status >= 400:
                         text = await resp.text()
                         if self.log:
-                            self.log.error(f'Discord API {method} {path} → {resp.status}: {text[:300]}')
+                            self.log.error(f'Discord API {method} {path} -> {resp.status}: {text[:300]}')
                         return {'_error': f'http_{resp.status}', '_body': text[:500]}
 
                     if resp.status == 204:
