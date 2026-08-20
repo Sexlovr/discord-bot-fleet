@@ -314,6 +314,16 @@ export default function Home() {
                 flash(`Clear all failed: ${e.message}`, 'err');
               }
             }}
+            onStopAll={async () => {
+              if (!confirm('STOP ALL bots immediately? Use this if bots keep replying after stopping.')) return;
+              try {
+                await api('/api/bots/stop-all', { method: 'POST' });
+                flash('Stop-all signal sent', 'ok');
+                await loadBots();
+              } catch (e: any) {
+                flash(`Stop all failed: ${e.message}`, 'err');
+              }
+            }}
             onDelete={async (b) => {
               if (!confirm(`Delete bot "${b.name}"?`)) return;
               try {
@@ -368,6 +378,7 @@ function BotsTab({
   onAction,
   onClearContext,
   onClearAll,
+  onStopAll,
   onDelete,
 }: {
   bots: Bot[];
@@ -378,6 +389,7 @@ function BotsTab({
   onAction: (b: Bot, action: 'start' | 'stop' | 'restart') => void;
   onClearContext: (b: Bot) => void;
   onClearAll: () => void;
+  onStopAll: () => void;
   onDelete: (b: Bot) => void;
 }) {
   return (
@@ -386,6 +398,7 @@ function BotsTab({
         <div className="flex items-center gap-2">
           <h2 className="text-lg font-semibold">Your bots</h2>
           <button onClick={onClearAll} className="text-xs bg-yellow-500/20 text-yellow-500 border border-yellow-500/30 px-2 py-1 rounded hover:bg-yellow-500/30">Clear All Context</button>
+          <button onClick={onStopAll} className="text-xs bg-red-500/20 text-red-400 border border-red-500/30 px-2 py-1 rounded hover:bg-red-500/30">Stop All Bots</button>
         </div>
         <h2 className="text-xl font-semibold">Bots</h2>
         <div className="flex gap-2">

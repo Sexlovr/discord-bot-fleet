@@ -1,6 +1,18 @@
 // Bot runtime — discord.js WebSocket gateway + multi-provider LLM + tools.
-// Runs as a singleton inside the Next.js process (not a separate child process
-// like the HF Space version — Next.js keeps the process alive between requests).
+// Runs as a singleton inside the Next.js process (not a separate child process).
+//
+// CRITICAL — HMR orphan handling:
+//   Next.js dev mode hot-reloads modules. A plain `const runningBots = new Map()`
+//   would be RE-CREATED on every HMR, so the old Discord WebSocket client
+//   (still alive in memory, still listening to Discord) becomes unreachable
+//   from the new module instance — clicking "Stop" in the panel finds an empty
+//   Map, marks the DB row as 'stopped', but the orphan keeps replying.
+//
+//   Fix: all state lives on `globalThis.__botFleetState`, which is stable
+//   across HMR. Plus an `activeClientId` per bot — every message handler
+//   captures its own clientId at registration, and bails out if the global
+//   activeClientId for that bot has moved on. This is double protection:
+//   even if a stray listener somehow survives destroy(), it will not reply.
 
 import { Client, GatewayIntentBits, Partials, Events } from 'discord.js';
 import { LLMClient, type LLMMessage } from './llm';
@@ -10,28 +22,67 @@ import { db } from './db';
 import { prismaBotToConfig, type BotConfig } from './types';
 import { writeLog } from './logger';
 
-// In-process state — persists between requests but not across restarts
-const runningBots = new Map<string, { client: Client; llm: LLMClient; config: BotConfig }>();
-const pendingSummons = new Map<string, { resolve: (s: string) => void; timeout: NodeJS.Timeout }>();
+// ---- Stable global state (survives HMR) ----
+type BotFleetState = {
+  runningBots: Map<string, { client: Client; llm: LLMClient; config: BotConfig; clientId: number }>;
+  pendingSummons: Map<string, { resolve: (s: string) => void; timeout: NodeJS.Timeout }>;
+  // Per-bot-per-channel history (in-memory, resets on full process restart).
+  // Keyed by `${botId}:${channelId}` so bots don't bleed history into each other.
+  botChannelHistory: Map<string, LLMMessage[]>;
+  // Per-bot-per-channel cooldown timestamp.
+  botLastReplyAt: Map<string, number>;
+  // Per-bot monotonically increasing ID — bumped on every start/stop.
+  // The message handler captures its own clientId at registration; if the
+  // current activeClientId for that bot has moved on, the handler bails.
+  activeClientIds: Map<string, number>;
+};
 
-// Per-bot-per-channel history (in-memory, resets on restart).
-// Keyed by `${botId}:${channelId}` so bots don't bleed history into each other.
-const botChannelHistory = new Map<string, LLMMessage[]>();
-// Per-bot-per-channel cooldown timestamp.
-const botLastReplyAt = new Map<string, number>();
+function getState(): BotFleetState {
+  const g = globalThis as unknown as { __botFleetState?: BotFleetState };
+  if (!g.__botFleetState) {
+    g.__botFleetState = {
+      runningBots: new Map(),
+      pendingSummons: new Map(),
+      botChannelHistory: new Map(),
+      botLastReplyAt: new Map(),
+      activeClientIds: new Map(),
+    };
+  }
+  return g.__botFleetState;
+}
+
+// Convenience local refs (re-fetched on every call so HMR can't cache a stale Map)
+const getRunningBots = () => getState().runningBots;
+const getPendingSummons = () => getState().pendingSummons;
+const getHistory = () => getState().botChannelHistory;
+const getLastReplyAt = () => getState().botLastReplyAt;
+const getActiveClientIds = () => getState().activeClientIds;
 
 function histKey(botId: string, channelId: string) { return `${botId}:${channelId}`; }
 
+// Bump the active client ID for a bot — old listeners will start ignoring messages.
+function bumpActiveClientId(botId: string): number {
+  const ids = getActiveClientIds();
+  const next = (ids.get(botId) || 0) + 1;
+  ids.set(botId, next);
+  return next;
+}
+
 export async function startBot(botId: string): Promise<void> {
+  const runningBots = getRunningBots();
   // If already running, destroy the old client first (handles HMR orphans + double-start)
   if (runningBots.has(botId)) {
     try {
       const old = runningBots.get(botId)!;
       old.client.removeAllListeners();
       old.client.destroy();
-    } catch {}
+    } catch { /* ignore */ }
     runningBots.delete(botId);
   }
+  // Bump active client id — the new client gets this id, and any stale
+  // listeners from previous HMR iterations will see a mismatch and bail.
+  const myClientId = bumpActiveClientId(botId);
+
   const bot = await db.bot.findUnique({ where: { id: botId } });
   if (!bot) throw new Error(`bot ${botId} not found`);
   if (!bot.tokenEnc) throw new Error(`bot ${botId} has no token configured`);
@@ -40,7 +91,7 @@ export async function startBot(botId: string): Promise<void> {
   const token = decryptString(bot.tokenEnc);
   const log = (level: string, msg: string, meta?: Record<string, unknown>) => writeLog(botId, level, msg, meta);
 
-  log('info', 'Bot starting', { name: config.name });
+  log('info', 'Bot starting', { name: config.name, client_id: myClientId });
 
   // Discord client — z.ai has no outbound WS restrictions, so direct connection works
   const client = new Client({
@@ -58,6 +109,12 @@ export async function startBot(botId: string): Promise<void> {
 
   // Cache discord_user_id after login
   client.once(Events.ClientReady, async (c) => {
+    // Bail if this client has been superseded (stop/start race during login)
+    if (getActiveClientIds().get(botId) !== myClientId) {
+      log('warn', 'ClientReady fired on stale client — destroying', { client_id: myClientId });
+      try { c.destroy(); } catch { /* ignore */ }
+      return;
+    }
     log('info', `Discord client ready — logged in as ${c.user.tag}`, { username: c.user.username });
     if (c.user.id !== config.discord_user_id) {
       await db.bot.update({ where: { id: botId }, data: { discordUserId: c.user.id } });
@@ -98,6 +155,7 @@ export async function startBot(botId: string): Promise<void> {
         return JSON.stringify({ error: `target bot "${target.name}" has no Discord user ID cached` });
       }
       const summonKey = `${targetBotId}:${channelId}`;
+      const pendingSummons = getPendingSummons();
       if (pendingSummons.has(summonKey)) {
         return JSON.stringify({ error: 'summon already in flight' });
       }
@@ -137,6 +195,10 @@ export async function startBot(botId: string): Promise<void> {
 
   // Message handler
   client.on(Events.MessageCreate, async (message) => {
+    // ---- HMR orphan guard ----
+    // If this client has been superseded (stop was clicked, or a new startBot
+    // replaced it), bail immediately — do NOT reply, do NOT mutate history.
+    if (getActiveClientIds().get(botId) !== myClientId) return;
     try {
       // Skip messages outside configured guild
       if (config.guild_id && message.guildId !== config.guild_id) return;
@@ -144,6 +206,9 @@ export async function startBot(botId: string): Promise<void> {
       if (config.channel_ids.length > 0 && !config.channel_ids.includes(message.channelId)) return;
       // Skip own messages
       if (message.author.id === client.user?.id) return;
+
+      // Re-check after async awaits below — client may have been stopped mid-reply
+      const stillActive = () => getActiveClientIds().get(botId) === myClientId;
 
       // isBotMessage: tracks if the incoming message was authored by ANY bot
       // (used for cooldown bypass logic below — bot-to-bot replies have no cooldown).
@@ -154,6 +219,7 @@ export async function startBot(botId: string): Promise<void> {
         for (const targetId of config.delegated_bots) {
           const target = await db.bot.findUnique({ where: { id: targetId } });
           if (target?.discordUserId === message.author.id) {
+            const pendingSummons = getPendingSummons();
             const summonKey = `${targetId}:${message.channelId}`;
             const pending = pendingSummons.get(summonKey);
             if (pending) {
@@ -168,10 +234,10 @@ export async function startBot(botId: string): Promise<void> {
             // Even if no pending summon, push the bot's reply to history so the
             // bot sees its delegate's response when it next replies.
             const hk = histKey(botId, message.channelId);
-            const hist = botChannelHistory.get(hk) || [];
+            const hist = getHistory().get(hk) || [];
             hist.push({ role: 'user', content: `${message.author.username}: ${message.content}` });
             while (hist.length > config.gating.max_context_messages) hist.shift();
-            botChannelHistory.set(hk, hist);
+            getHistory().set(hk, hist);
             return;
           }
         }
@@ -182,10 +248,10 @@ export async function startBot(botId: string): Promise<void> {
 
       // Push to per-bot-channel history
       const hk = histKey(botId, message.channelId);
-      const hist = botChannelHistory.get(hk) || [];
+      const hist = getHistory().get(hk) || [];
       hist.push({ role: 'user', content: `${message.author.username}: ${content}` });
       while (hist.length > config.gating.max_context_messages) hist.shift();
-      botChannelHistory.set(hk, hist);
+      getHistory().set(hk, hist);
 
       // shouldRespond? (bot-to-bot bypasses ignore_bots + cooldown)
       if (isBotMessage && config.gating.ignore_bots) return;
@@ -196,10 +262,13 @@ export async function startBot(botId: string): Promise<void> {
       }
       // Per-bot-per-channel cooldown — but bypass for bot-to-bot messages.
       if (!isBotMessage) {
-        const last = botLastReplyAt.get(hk) || 0;
+        const last = getLastReplyAt().get(hk) || 0;
         if (Date.now() - last < config.gating.cooldown_ms) return;
       }
       if (Math.random() > config.gating.response_probability) return;
+
+      // Final pre-reply orphan check
+      if (!stillActive()) return;
 
       log('info', 'Responding to message', {
         author: message.author.username,
@@ -211,7 +280,7 @@ export async function startBot(botId: string): Promise<void> {
       // Build LLM messages
       const llmMessages: LLMMessage[] = [
         { role: 'system', content: config.persona },
-        ...(botChannelHistory.get(hk) || []),
+        ...(getHistory().get(hk) || []),
       ];
 
       // Tool calling loop
@@ -222,8 +291,11 @@ export async function startBot(botId: string): Promise<void> {
       let emptyRetries = 0;
 
       while (rounds < MAX_TOOL_ROUNDS) {
+        if (!stillActive()) return;
         const resp = await llm.chat(llmMessages, enabledTools);
         rounds++;
+
+        if (!stillActive()) return;
 
         if (resp.tool_calls && resp.tool_calls.length > 0) {
           llmMessages.push({
@@ -260,18 +332,27 @@ export async function startBot(botId: string): Promise<void> {
           continue;
         }
 
+        // Final orphan check before sending
+        if (!stillActive()) return;
+
         // response_delay_ms — wait before sending reply (mimics human "typing" latency)
         if (config.gating.response_delay_ms > 0) {
           try {
             await message.channel.sendTyping?.();
           } catch { /* not all channels support sendTyping */ }
+          // Re-check after the delay — the bot may have been stopped during typing
+          if (!stillActive()) return;
           await new Promise(r => setTimeout(r, Math.min(config.gating.response_delay_ms, 30000)));
+          if (!stillActive()) return;
         }
 
         // Send to Discord (chunk if >2000 chars)
         const chunks = chunkString(reply, 2000);
         try {
-          for (const chunk of chunks) await message.channel.send(chunk);
+          for (const chunk of chunks) {
+            if (!stillActive()) return;
+            await message.channel.send(chunk);
+          }
         } catch (e) {
           log('error', 'Failed to send reply', { error: (e as Error).message });
           return;
@@ -279,7 +360,7 @@ export async function startBot(botId: string): Promise<void> {
 
         hist.push({ role: 'assistant', content: reply });
         // Update per-bot-per-channel cooldown
-        botLastReplyAt.set(hk, Date.now());
+        getLastReplyAt().set(hk, Date.now());
 
         // Random emoji reaction (10% chance) when react_to_message tool is enabled
         if (config.tools.react_to_message && Math.random() < 0.1) {
@@ -301,7 +382,10 @@ export async function startBot(botId: string): Promise<void> {
     }
   });
 
-  client.on(Events.Error, (e) => log('error', 'Discord client error', { message: e.message }));
+  client.on(Events.Error, (e) => {
+    if (getActiveClientIds().get(botId) !== myClientId) return;
+    log('error', 'Discord client error', { message: e.message });
+  });
 
   // Login with retry
   const MAX_LOGIN_ATTEMPTS = 5;
@@ -325,40 +409,77 @@ export async function startBot(botId: string): Promise<void> {
     throw new Error('All login attempts failed');
   }
 
-  runningBots.set(botId, { client, llm, config });
+  // If superseded during login, destroy immediately
+  if (getActiveClientIds().get(botId) !== myClientId) {
+    log('warn', 'Bot was stopped during login — destroying client', { client_id: myClientId });
+    try { client.removeAllListeners(); client.destroy(); } catch { /* ignore */ }
+    return;
+  }
+
+  runningBots.set(botId, { client, llm, config, clientId: myClientId });
 }
 
 // Clear in-memory chat history + cooldown for a single bot
 export function clearBotContext(botId: string): void {
-  for (const key of botChannelHistory.keys()) {
-    if (key.startsWith(`${botId}:`)) botChannelHistory.delete(key);
+  const history = getHistory();
+  const lastReplyAt = getLastReplyAt();
+  for (const key of history.keys()) {
+    if (key.startsWith(`${botId}:`)) history.delete(key);
   }
-  for (const key of botLastReplyAt.keys()) {
-    if (key.startsWith(`${botId}:`)) botLastReplyAt.delete(key);
+  for (const key of lastReplyAt.keys()) {
+    if (key.startsWith(`${botId}:`)) lastReplyAt.delete(key);
   }
   writeLog(botId, 'info', 'Context cleared');
 }
 
 // Clear in-memory chat history for ALL bots
 export function clearAllContext(): void {
-  botChannelHistory.clear();
-  botLastReplyAt.clear();
+  getHistory().clear();
+  getLastReplyAt().clear();
   writeLog('system', 'info', 'All bot contexts cleared');
 }
 
 export async function stopBot(botId: string): Promise<void> {
+  const runningBots = getRunningBots();
+  // ALWAYS bump the active client id first — this makes any in-flight
+  // message handlers bail out, even if the client isn't in our Map
+  // (e.g. an HMR orphan in a previous module instance still listening).
+  bumpActiveClientId(botId);
+
   const bot = runningBots.get(botId);
   if (!bot) {
     await db.bot.update({ where: { id: botId }, data: { status: 'stopped' } }).catch(() => {});
+    writeLog(botId, 'info', 'Stop requested — no running client found (likely HMR orphan or already stopped). Active ID bumped.');
     return;
   }
-  try { bot.client.destroy(); } catch { /* ignore */ }
+  try {
+    bot.client.removeAllListeners();
+    bot.client.destroy();
+  } catch { /* ignore */ }
   runningBots.delete(botId);
   await db.bot.update({ where: { id: botId }, data: { status: 'stopped' } }).catch(() => {});
   // Clean up per-bot in-memory state
-  for (const key of botChannelHistory.keys()) if (key.startsWith(`${botId}:`)) botChannelHistory.delete(key);
-  for (const key of botLastReplyAt.keys()) if (key.startsWith(`${botId}:`)) botLastReplyAt.delete(key);
+  const history = getHistory();
+  const lastReplyAt = getLastReplyAt();
+  for (const key of history.keys()) if (key.startsWith(`${botId}:`)) history.delete(key);
+  for (const key of lastReplyAt.keys()) if (key.startsWith(`${botId}:`)) lastReplyAt.delete(key);
   writeLog(botId, 'info', 'Bot stopped');
+}
+
+// Stop ALL bots — used by the "Stop All" emergency button and during shutdown.
+export async function stopAllBots(): Promise<void> {
+  const runningBots = getRunningBots();
+  const ids = Array.from(runningBots.keys());
+  writeLog('system', 'info', `Stopping all bots (${ids.length})`);
+  await Promise.all(ids.map(id => stopBot(id).catch(() => {})));
+  // Safety net: any DB rows still marked 'running' (e.g. orphaned by a
+  // previous HMR iteration that never got its status updated) get marked
+  // 'stopped' so the next page refresh shows the truth.
+  try {
+    await db.bot.updateMany({ where: { status: 'running' }, data: { status: 'stopped' } });
+  } catch (e) {
+    writeLog('system', 'error', 'stopAllBots: failed to sweep DB status', { error: (e as Error).message });
+  }
 }
 
 export async function restartBot(botId: string): Promise<void> {
@@ -367,15 +488,16 @@ export async function restartBot(botId: string): Promise<void> {
 }
 
 export function isBotRunning(botId: string): boolean {
-  return runningBots.has(botId);
+  return getRunningBots().has(botId);
 }
 
 export function listRunningBots(): string[] {
-  return Array.from(runningBots.keys());
+  return Array.from(getRunningBots().keys());
 }
 
 // Orphan check — stop any in-process bots whose DB records are gone
 export async function reapOrphanedBots(): Promise<void> {
+  const runningBots = getRunningBots();
   const runningIds = Array.from(runningBots.keys());
   if (runningIds.length === 0) return;
   const existing = await db.bot.findMany({ where: { id: { in: runningIds } }, select: { id: true } });
@@ -392,12 +514,7 @@ export async function reapOrphanedBots(): Promise<void> {
 export async function autoSeedBots(): Promise<void> {
   const count = await db.bot.count();
   if (count > 0) return;
-  const { encryptString } = await import('./crypto');
-  const { nanoid } = await import('nanoid');
-  // No bots — don't create one with a fake token; just log so the user knows.
-  // (Creating a bot without a real token would just produce an un-startable row.)
   writeLog('system', 'info', 'No bots found in DB — create one via the panel.');
-  void encryptString; void nanoid; // keep imports live for future use
 }
 
 // Auto-restart bots on Next.js process restart (in case of crash/deploy)
