@@ -38,6 +38,7 @@ model Bot {
   ignoreBots          Boolean @default(true)
   maxContextMessages  Int     @default(30)
   cooldownMs          Int     @default(1500)
+  responseDelayMs     Int     @default(0) // ms to wait before sending response
 
   // Tools (each toggleable)
   toolWebSearch       Boolean @default(true)

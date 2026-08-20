@@ -32,14 +32,22 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     delete patch.token;
   }
 
-  // Legacy LLM API key rotation
-  if (patch.llm && typeof (patch.llm as any).api_key === 'string') {
-    const apiKey = (patch.llm as any).api_key;
-    patch.llmProxyUrl = (patch.llm as any).proxy_url ?? bot.llmProxyUrl;
-    patch.llmModel = (patch.llm as any).model ?? bot.llmModel;
-    patch.llmTemperature = (patch.llm as any).temperature ?? bot.llmTemperature;
-    patch.llmMaxTokens = (patch.llm as any).max_tokens ?? bot.llmMaxTokens;
-    patch.llmApiKeyEnc = apiKey ? encryptString(apiKey) : bot.llmApiKeyEnc;
+  // guild_id → guildId
+  if (typeof patch.guild_id === 'string') {
+    patch.guildId = patch.guild_id;
+    delete patch.guild_id;
+  }
+
+  // Legacy LLM config — flatten any provided fields
+  if (patch.llm && typeof patch.llm === 'object') {
+    const llmPatch = patch.llm as any;
+    if (llmPatch.proxy_url !== undefined) patch.llmProxyUrl = llmPatch.proxy_url;
+    if (llmPatch.model !== undefined) patch.llmModel = llmPatch.model;
+    if (llmPatch.temperature !== undefined) patch.llmTemperature = llmPatch.temperature;
+    if (llmPatch.max_tokens !== undefined) patch.llmMaxTokens = llmPatch.max_tokens;
+    if (typeof llmPatch.api_key === 'string') {
+      patch.llmApiKeyEnc = llmPatch.api_key ? encryptString(llmPatch.api_key) : '';
+    }
     delete patch.llm;
   }
 
@@ -58,10 +66,19 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     patch.providers = JSON.stringify(newProviders);
   }
 
-  // channel_ids / delegated_bots / skip_patterns → JSON-encode
-  if (Array.isArray(patch.channel_ids)) patch.channelIds = JSON.stringify(patch.channel_ids);
-  if (Array.isArray(patch.delegated_bots)) patch.delegatedBots = JSON.stringify(patch.delegated_bots);
-  if (Array.isArray(patch.skip_patterns)) patch.skipPatterns = JSON.stringify(patch.skip_patterns);
+  // channel_ids / delegated_bots / skip_patterns → JSON-encode, then DELETE the snake_case key
+  if (Array.isArray(patch.channel_ids)) {
+    patch.channelIds = JSON.stringify(patch.channel_ids);
+    delete patch.channel_ids;
+  }
+  if (Array.isArray(patch.delegated_bots)) {
+    patch.delegatedBots = JSON.stringify(patch.delegated_bots);
+    delete patch.delegated_bots;
+  }
+  if (Array.isArray(patch.skip_patterns)) {
+    patch.skipPatterns = JSON.stringify(patch.skip_patterns);
+    delete patch.skip_patterns;
+  }
 
   // Flatten gating.* fields
   if (patch.gating) {
@@ -71,25 +88,25 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     if (g.ignore_bots !== undefined) patch.ignoreBots = g.ignore_bots;
     if (g.max_context_messages !== undefined) patch.maxContextMessages = g.max_context_messages;
     if (g.cooldown_ms !== undefined) patch.cooldownMs = g.cooldown_ms;
+    if (g.response_delay_ms !== undefined) patch.responseDelayMs = g.response_delay_ms;
     delete patch.gating;
   }
 
   // Flatten tools.* fields
   if (patch.tools) {
     const t = patch.tools as any;
+    const colMap: Record<string, string> = {
+      web_search: 'toolWebSearch',
+      ping_proxy: 'toolPingProxy',
+      fetch_url: 'toolFetchUrl',
+      github_lookup: 'toolGithubLookup',
+      memory: 'toolMemory',
+      schedule_reminder: 'toolScheduleReminder',
+      react_to_message: 'toolReactToMessage',
+      summon_bot: 'toolSummonBot',
+    };
     for (const [k, v] of Object.entries(t)) {
-      const dbField = k.replace(/_./g, m => m[1].toUpperCase()).replace(/^./, c => c.toLowerCase());
-      const colMap: Record<string, string> = {
-        webSearch: 'toolWebSearch',
-        pingProxy: 'toolPingProxy',
-        fetchUrl: 'toolFetchUrl',
-        githubLookup: 'toolGithubLookup',
-        memory: 'toolMemory',
-        scheduleReminder: 'toolScheduleReminder',
-        reactToMessage: 'toolReactToMessage',
-        summonBot: 'toolSummonBot',
-      };
-      if (colMap[dbField]) patch[colMap[dbField]] = v;
+      if (colMap[k]) patch[colMap[k]] = v;
     }
     delete patch.tools;
   }
@@ -97,7 +114,11 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   // Never let user patch these directly
   delete patch.id;
   delete patch.createdAt;
+  delete patch.updatedAt;
   delete patch.status;
+  delete patch.token_masked;
+  delete patch.discord_user_id;
+  delete patch.providers_public; // legacy guard
 
   const updated = await db.bot.update({ where: { id }, data: patch as any });
   return NextResponse.json(sanitizeBot(updated));

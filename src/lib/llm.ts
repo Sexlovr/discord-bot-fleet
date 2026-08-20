@@ -170,21 +170,39 @@ export class LLMClient {
   }
 
   async chat(messages: LLMMessage[], tools: LLMTool[] = []): Promise<LLMResponse> {
-    const errors: string[] = [];
-    for (let i = 0; i < this.providers.length; i++) {
-      const provider = this.providers[i];
+    if (this.providers.length === 1) {
+      // No racing needed for single provider
+      const provider = this.providers[0];
       try {
-        const resp = await provider.chat(messages, tools);
-        if (i > 0) resp.used_fallback = true;
-        return resp;
+        return await provider.chat(messages, tools);
       } catch (e) {
         const err = e as Error;
-        errors.push(`${provider.name}: ${err.message}`);
-        // Try next provider
-        continue;
+        throw new LLMProviderError(`${provider.name}: ${err.message}`);
       }
     }
-    throw new LLMProviderError('All providers failed: ' + errors.join(' | '));
+
+    // Race all enabled providers in parallel — first successful response wins.
+    // Failed providers are silently ignored as long as at least one succeeds.
+    const promises = this.providers.map(p =>
+      p.chat(messages, tools).then(resp => {
+        // Tag which provider won
+        (resp as any).provider_used = (resp as any).provider_used || p.name;
+        return resp;
+      })
+    );
+
+    try {
+      const winner = await Promise.any(promises);
+      return winner;
+    } catch (aggErr) {
+      // Promise.any throws AggregateError when ALL promises reject
+      const agg = aggErr as AggregateError;
+      const errors = (agg?.errors || []).map((e: unknown, i: number) => {
+        const err = e as Error;
+        return `${this.providers[i]?.name || '?'}: ${err?.message || String(e)}`;
+      });
+      throw new LLMProviderError('All providers failed: ' + errors.join(' | '));
+    }
   }
 
   static async ping(proxyUrl: string, apiKey: string, model?: string): Promise<{

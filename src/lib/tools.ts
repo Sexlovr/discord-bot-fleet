@@ -394,6 +394,57 @@ const SUMMON_BOT_TOOL: LLMTool = {
   },
 };
 
+// ─── react_to_message ────────────────────────────────────────────────────────
+// Lets the LLM add one or more emoji reactions to the triggering message.
+// Multi-emoji: pass an array of emoji and each will be applied in order.
+const REACT_TO_MESSAGE_TOOL: LLMTool = {
+  type: 'function',
+  function: {
+    name: 'react_to_message',
+    description: 'Add one or more emoji reactions to the user\'s message. Use this to silently acknowledge or react to a message before/instead of replying. Supports any standard Discord emoji (unicode or :name:).',
+    parameters: {
+      type: 'object',
+      properties: {
+        emojis: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'List of emoji to react with (e.g. ["👍","💜"] or ["🎉","👀","🤔"]). Max 5.',
+        },
+      },
+      required: ['emojis'],
+    },
+  },
+};
+
+async function reactToMessageHandler(args: { emojis: string[] | string }, ctx: ToolContext): Promise<string> {
+  // Normalize to array
+  let emojis: string[];
+  if (typeof args.emojis === 'string') emojis = [args.emojis];
+  else emojis = Array.isArray(args.emojis) ? args.emojis : [];
+  if (emojis.length === 0) return JSON.stringify({ error: 'no emoji provided' });
+  if (emojis.length > 5) emojis = emojis.slice(0, 5);
+
+  // We need the channel ID + message ID — injected via _channel_id (the runtime
+  // also needs to pass _message_id; the bot.ts handler sets _channel_id only,
+  // so we use the last channel message if message id is missing).
+  const channelId = (args as any)._channel_id;
+  const messageId = (args as any)._message_id;
+  if (!channelId || !messageId) {
+    return JSON.stringify({ error: 'no channel/message context' });
+  }
+  const added: string[] = [];
+  const errors: Array<{ emoji: string; error: string }> = [];
+  for (const emoji of emojis) {
+    try {
+      await ctx.addReaction(channelId, messageId, emoji);
+      added.push(emoji);
+    } catch (e) {
+      errors.push({ emoji, error: (e as Error).message });
+    }
+  }
+  return JSON.stringify({ ok: true, added, errors });
+}
+
 // ─── Tool context ─────────────────────────────────────────────────────────
 export interface ToolContext {
   botConfig: BotConfig;
@@ -402,7 +453,6 @@ export interface ToolContext {
   summonBot?: (targetBotId: string, message: string, timeoutSec: number, channelId: string) => Promise<string>;
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 type ToolHandler = (args: any, ctx: ToolContext) => Promise<string>;
 
 const ALL_TOOLS: Record<string, { schema: LLMTool; handler: ToolHandler }> = {
@@ -413,6 +463,7 @@ const ALL_TOOLS: Record<string, { schema: LLMTool; handler: ToolHandler }> = {
   memory_write: { schema: MEMORY_WRITE_TOOL, handler: memoryWriteHandler as ToolHandler },
   schedule_reminder: { schema: SCHEDULE_TOOL, handler: scheduleHandler as ToolHandler },
   web_search: { schema: WEB_SEARCH_TOOL, handler: webSearchHandler as ToolHandler },
+  react_to_message: { schema: REACT_TO_MESSAGE_TOOL, handler: reactToMessageHandler as ToolHandler },
   summon_bot: {
     schema: SUMMON_BOT_TOOL,
     handler: (async (args: any, ctx: ToolContext) => {
@@ -433,6 +484,7 @@ export function getEnabledTools(config: BotConfig): LLMTool[] {
   }
   if (config.tools.schedule_reminder) enabled.push(ALL_TOOLS.schedule_reminder.schema);
   if (config.tools.web_search)        enabled.push(ALL_TOOLS.web_search.schema);
+  if (config.tools.react_to_message)  enabled.push(ALL_TOOLS.react_to_message.schema);
   if (config.tools.summon_bot && config.delegated_bots.length > 0) {
     enabled.push(ALL_TOOLS.summon_bot.schema);
   }
@@ -441,7 +493,6 @@ export function getEnabledTools(config: BotConfig): LLMTool[] {
 
 export async function dispatchTool(
   name: string,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   args: any,
   ctx: ToolContext
 ): Promise<string> {

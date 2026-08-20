@@ -51,6 +51,7 @@ export interface BotConfig {
     ignore_own_messages: boolean;
     max_context_messages: number;
     cooldown_ms: number;
+    response_delay_ms: number;
   };
 
   tools: {
@@ -107,6 +108,7 @@ export function prismaBotToConfig(b: PrismaBot): BotConfig {
       ignore_own_messages: true,
       max_context_messages: b.maxContextMessages,
       cooldown_ms: b.cooldownMs,
+      response_delay_ms: (b as any).responseDelayMs ?? 0,
     },
     tools: {
       web_search: b.toolWebSearch,
@@ -124,11 +126,16 @@ export function prismaBotToConfig(b: PrismaBot): BotConfig {
 // Sanitize config for client (no secrets)
 export function sanitizeBot(b: PrismaBot) {
   const config = prismaBotToConfig(b);
+  const llmKeyEnc = config.llm.api_key_enc;
   return {
     ...config,
     token_enc: undefined,
     token_masked: config.token_enc ? maskTokenSafe(config.token_enc) : '',
-    llm: { ...config.llm, api_key_enc: undefined },
+    llm: {
+      ...config.llm,
+      api_key_enc: undefined,
+      api_key_masked: llmKeyEnc ? 'set' : 'unset',
+    },
     providers: config.providers.map(p => ({
       ...p,
       api_key_enc: undefined,

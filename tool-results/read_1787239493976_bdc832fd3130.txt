@@ -1,0 +1,493 @@
+     1→'use client';
+     2→
+     3→import { useState, useEffect, useRef, useCallback } from 'react';
+     4→
+     5→let _onUnauthorized: (() => void) | null = null;
+     6→
+     7→async function api(path: string, opts: RequestInit = {}) {
+     8→  const token = typeof localStorage !== 'undefined' ? localStorage.getItem('session_token') || '' : '';
+     9→  const res = await fetch(path, {
+    10→    ...opts,
+    11→    headers: { 'Content-Type': 'application/json', 'x-session-token': token, ...(opts.headers as Record<string, string> || {}) },
+    12→  });
+    13→  if (res.status === 401) { if (_onUnauthorized) _onUnauthorized(); throw new Error('unauthorized'); }
+    14→  const data = await res.json().catch(() => ({}));
+    15→  if (!res.ok) throw new Error((data as any).error || `HTTP ${res.status}`);
+    16→  return data;
+    17→}
+    18→
+    19→function timeAgo(ts: number | string) {
+    20→  if (!ts) return 'never';
+    21→  const d = new Date(ts);
+    22→  const sec = Math.floor((Date.now() - d.getTime()) / 1000);
+    23→  if (sec < 60) return sec + 's ago';
+    24→  if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
+    25→  if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
+    26→  return d.toLocaleDateString();
+    27→}
+    28→
+    29→function esc(s: any) {
+    30→  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
+    31→}
+    32→
+    33→// ─── Types ───────────────────────────────────────────────────────────────
+    34→interface Provider {
+    35→  id: string; name: string; type: 'openai' | 'zai'; priority: number; enabled: boolean;
+    36→  proxy_url?: string; model?: string; temperature?: number; max_tokens?: number;
+    37→  api_key_masked?: string; zai_thinking?: string;
+    38→}
+    39→
+    40→interface Bot {
+    41→  id: string; name: string; persona: string; status: string; discord_user_id?: string;
+    42→  channel_ids: string[]; delegated_bots: string[];
+    43→  providers: Provider[];
+    44→  llm: { proxy_url: string; model: string; temperature: number; max_tokens: number; api_key_masked?: string };
+    45→  gating: { response_probability: number; skip_patterns: string[]; ignore_bots: boolean; max_context_messages: number; cooldown_ms: number; response_delay_ms?: number };
+    46→  tools: Record<string, boolean>;
+    47→  token_masked?: string;
+    48→  updated_at: number;
+    49→}
+    50→
+    51→const DEFAULT_TOOLS: Record<string, boolean> = {
+    52→  web_search: true, ping_proxy: true, fetch_url: true, github_lookup: true,
+    53→  memory: true, schedule_reminder: true, react_to_message: true, summon_bot: false,
+    54→};
+    55→
+    56→const TOOL_DESCS: Record<string, string> = {
+    57→  web_search: 'Search the web', ping_proxy: 'Test LLM proxies', fetch_url: 'Fetch URLs (SSRF-safe)',
+    58→  github_lookup: 'GitHub repo lookup', memory: 'Remember things', schedule_reminder: 'Schedule reminders',
+    59→  react_to_message: 'Add emoji reactions', summon_bot: 'Summon other bots',
+    60→};
+    61→
+    62→// ─── Login ────────────────────────────────────────────────────────────────
+    63→function Login({ onLogin }: { onLogin: () => void }) {
+    64→  const [pw, setPw] = useState(''); const [err, setErr] = useState(''); const [loading, setLoading] = useState(false);
+    65→  const submit = async (e: React.FormEvent) => {
+    66→    e.preventDefault(); setErr(''); setLoading(true);
+    67→    try {
+    68→      const r = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
+    69→      const data = await r.json();
+    70→      if (!r.ok) throw new Error(data.error || 'login failed');
+    71→      localStorage.setItem('session_token', data.token);
+    72→      onLogin();
+    73→    } catch (e) { setErr((e as Error).message); } finally { setLoading(false); }
+    74→  };
+    75→  return (
+    76→    <div className="min-h-screen flex items-center justify-center p-4 bg-background">
+    77→      <div className="w-full max-w-md bg-card border border-border rounded-2xl p-8 shadow-xl">
+    78→        <div className="flex items-center gap-3 mb-6">
+    79→          <div className="w-12 h-12 rounded-xl bg-primary/15 flex items-center justify-center text-2xl">🤖</div>
+    80→          <div><h1 className="text-xl font-bold">Bot Fleet</h1><p className="text-xs text-muted-foreground">Multi-bot Discord control panel</p></div>
+    81→        </div>
+    82→        <form onSubmit={submit} className="space-y-4">
+    83→          <input type="password" value={pw} onChange={e => setPw(e.target.value)} required autoFocus placeholder="Admin password"
+    84→            className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm" />
+    85→          <button type="submit" disabled={loading} className="w-full bg-primary text-primary-foreground rounded-lg py-2 text-sm font-medium disabled:opacity-50">
+    86→            {loading ? 'Signing in…' : 'Sign in'}
+    87→          </button>
+    88→          {err && <div className="text-xs text-red-500">{err}</div>}
+    89→        </form>
+    90→      </div>
+    91→    </div>
+    92→  );
+    93→}
+    94→
+    95→// ─── Bot Card ──────────────────────────────────────────────────────────────
+    96→function BotCard({ bot, onEdit, onStart, onStop, onRestart, onDelete }: any) {
+    97→  const activeP = bot.providers?.filter((p: Provider) => p.enabled).length || 0;
+    98→  const emoji = bot.name?.toLowerCase().includes('yuki') ? '🌸' : bot.name?.toLowerCase().includes('hana') ? '📚' : bot.name?.toLowerCase().includes('scylla') ? '🐙' : '🤖';
+    99→  return (
+   100→    <div className="bg-card border border-border rounded-2xl p-5 hover:border-primary/50 transition">
+   101→      <div className="flex items-start justify-between mb-3">
+   102→        <div className="flex items-center gap-3">
+   103→          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/30 to-primary/5 flex items-center justify-center text-lg">{emoji}</div>
+   104→          <div><div className="font-semibold text-sm">{esc(bot.name)}</div><div className="text-xs text-muted-foreground font-mono">{bot.id}</div></div>
+   105→        </div>
+   106→        <span className="flex items-center gap-2 text-xs">
+   107→          <span className={`inline-block w-2 h-2 rounded-full ${bot.status === 'running' ? 'bg-green-500 animate-pulse' : bot.status === 'error' ? 'bg-red-500' : 'bg-gray-500'}`}></span>
+   108→          {bot.status}
+   109→        </span>
+   110→      </div>
+   111→      <div className="space-y-1 text-xs text-muted-foreground mb-3">
+   112→        <div>Providers: <span className="text-foreground">{activeP} active</span></div>
+   113→        <div>Channels: <span className="text-foreground">{bot.channel_ids?.length || 0}</span></div>
+   114→        {bot.providers?.map((p: Provider) => <div key={p.id} className="text-[10px] text-muted-foreground/60">· {p.name}: {p.model || '?'}</div>)}
+   115→        <div>Updated: {timeAgo(bot.updated_at)}</div>
+   116→      </div>
+   117→      <div className="flex gap-1 pt-3 border-t border-border">
+   118→        {bot.status === 'running' ? (
+   119→          <><button onClick={onStop} className="flex-1 text-xs bg-muted hover:bg-yellow-500/20 hover:text-yellow-600 border border-border rounded-lg py-1.5">Stop</button>
+   120→            <button onClick={onRestart} className="flex-1 text-xs bg-muted hover:bg-blue-500/20 hover:text-blue-400 border border-border rounded-lg py-1.5">↻</button></>
+   121→        ) : (
+   122→          <button onClick={onStart} className="flex-1 text-xs bg-muted hover:bg-green-500/20 hover:text-green-600 border border-border rounded-lg py-1.5">Start</button>
+   123→        )}
+   124→        <button onClick={onEdit} className="flex-1 text-xs bg-muted hover:bg-primary/20 hover:text-primary border border-border rounded-lg py-1.5">Edit</button>
+   125→        <button onClick={onDelete} className="text-xs bg-muted hover:bg-red-500/20 hover:text-red-600 border border-border rounded-lg px-3 py-1.5">Del</button>
+   126→      </div>
+   127→    </div>
+   128→  );
+   129→}
+   130→
+   131→// ─── Provider Editor ───────────────────────────────────────────────────────
+   132→function ProviderEditor({ p, onChange, onRemove }: { p: Provider; onChange: (p: Provider) => void; onRemove: () => void }) {
+   133→  return (
+   134→    <div className="border border-border rounded-lg p-3 space-y-2 bg-background/50">
+   135→      <div className="flex items-center gap-2">
+   136→        <input value={p.name} onChange={e => onChange({ ...p, name: e.target.value })} placeholder="Provider name"
+   137→          className="flex-1 bg-background border border-border rounded px-2 py-1 text-sm" />
+   138→        <select value={p.type} onChange={e => onChange({ ...p, type: e.target.value as 'openai' | 'zai' })}
+   139→          className="bg-background border border-border rounded px-2 py-1 text-sm">
+   140→          <option value="openai">openai</option>
+   141→          <option value="zai">zai</option>
+   142→        </select>
+   143→        <button onClick={() => onChange({ ...p, enabled: !p.enabled })} className={`px-2 py-1 text-xs rounded border ${p.enabled ? 'bg-green-500/20 text-green-500 border-green-500/30' : 'bg-muted text-muted-foreground border-border'}`}>{p.enabled ? 'ON' : 'OFF'}</button>
+   144→        <button onClick={onRemove} className="px-2 py-1 text-xs rounded border bg-red-500/20 text-red-500 border-red-500/30">×</button>
+   145→      </div>
+   146→      {p.type === 'openai' && (
+   147→        <input value={p.proxy_url || ''} onChange={e => onChange({ ...p, proxy_url: e.target.value })} placeholder="Proxy URL"
+   148→          className="w-full bg-background border border-border rounded px-2 py-1 text-sm font-mono" />
+   149→      )}
+   150→      <div className="grid grid-cols-2 gap-2">
+   151→        <input value={p.model || ''} onChange={e => onChange({ ...p, model: e.target.value })} placeholder="Model"
+   152→          className="bg-background border border-border rounded px-2 py-1 text-sm font-mono" />
+   153→        <input value={p.api_key_masked === 'set' ? '••••' : ''} onChange={e => onChange({ ...p, api_key_masked: e.target.value ? 'new' : 'unset' } as any)} placeholder="API key (blank=keep)"
+   154→          className="bg-background border border-border rounded px-2 py-1 text-sm font-mono" />
+   155→      </div>
+   156→      <div className="grid grid-cols-3 gap-2">
+   157→        <label className="text-xs">Temp: <input type="number" step="0.05" min="0" max="2" value={p.temperature ?? 0.85} onChange={e => onChange({ ...p, temperature: parseFloat(e.target.value) })} className="w-full bg-background border border-border rounded px-1 py-0.5 text-xs" /></label>
+   158→        <label className="text-xs">Max tok: <input type="number" min="50" max="8000" value={p.max_tokens ?? 1500} onChange={e => onChange({ ...p, max_tokens: parseInt(e.target.value) })} className="w-full bg-background border border-border rounded px-1 py-0.5 text-xs" /></label>
+   159→        <label className="text-xs">Priority: <input type="number" min="1" max="10" value={p.priority ?? 1} onChange={e => onChange({ ...p, priority: parseInt(e.target.value) })} className="w-full bg-background border border-border rounded px-1 py-0.5 text-xs" /></label>
+   160→      </div>
+   161→      {p.type === 'zai' && (
+   162→        <label className="text-xs flex items-center gap-2">Thinking: <select value={p.zai_thinking || 'disabled'} onChange={e => onChange({ ...p, zai_thinking: e.target.value })} className="bg-background border border-border rounded px-1 py-0.5 text-xs"><option value="disabled">disabled</option><option value="enabled">enabled</option></select></label>
+   163→      )}
+   164→    </div>
+   165→  );
+   166→}
+   167→
+   168→// ─── Bot Editor ───────────────────────────────────────────────────────────
+   169→function BotEditor({ bot, allBots, onClose, onSaved }: { bot: Bot | null; allBots: Bot[]; onClose: () => void; onSaved: () => void }) {
+   170→  const isCreate = !bot;
+   171→  const [name, setName] = useState('');
+   172→  const [persona, setPersona] = useState('');
+   173→  const [token, setToken] = useState('');
+   174→  const [guildId, setGuildId] = useState('');
+   175→  const [channelIds, setChannelIds] = useState<string[]>([]);
+   176→  const [providers, setProviders] = useState<Provider[]>([]);
+   177→  const [prob, setProb] = useState(1.0);
+   178→  const [skipPats, setSkipPats] = useState('^\\+$\n^-$\n^(k|kk)$');
+   179→  const [cooldown, setCooldown] = useState(2000);
+   180→  const [maxCtx, setMaxCtx] = useState(1000000);
+   181→  const [delay, setDelay] = useState(0);
+   182→  const [ignoreBots, setIgnoreBots] = useState(false);
+   183→  const [tools, setTools] = useState({ ...DEFAULT_TOOLS });
+   184→  const [delegatedBots, setDelegatedBots] = useState<string[]>([]);
+   185→  const [guilds, setGuilds] = useState<any[]>([]);
+   186→  const [chLoading, setChLoading] = useState(false);
+   187→  const [error, setError] = useState('');
+   188→  const [saving, setSaving] = useState(false);
+   189→
+   190→  useEffect(() => {
+   191→    if (!bot) return;
+   192→    api(`/api/bots/${bot.id}`).then((b: any) => {
+   193→      setName(b.name || ''); setPersona(b.persona || ''); setGuildId(b.guild_id || '');
+   194→      setChannelIds(b.channel_ids || []); setProviders(b.providers || []);
+   195→      setProb(b.gating?.response_probability ?? 1.0);
+   196→      setSkipPats((b.gating?.skip_patterns || ['^\\+$', '^-$', '^(k|kk)$']).join('\n'));
+   197→      setCooldown(b.gating?.cooldown_ms ?? 2000);
+   198→      setMaxCtx(b.gating?.max_context_messages ?? 1000000);
+   199→      setDelay(b.gating?.response_delay_ms ?? 0);
+   200→      setIgnoreBots(b.gating?.ignore_bots ?? false);
+   201→      setTools({ ...DEFAULT_TOOLS, ...(b.tools || {}) });
+   202→      setDelegatedBots(b.delegated_bots || []);
+   203→    }).catch((e: any) => setError(e.message));
+   204→    // Auto-load channels
+   205→    api(`/api/bots/${bot.id}/channels`).then((data: any) => {
+   206→      if (data.guilds) setGuilds(data.guilds);
+   207→    }).catch(() => {});
+   208→  }, [bot]);
+   209→
+   210→  const loadChannels = async () => {
+   211→    setChLoading(true); setError('');
+   212→    try {
+   213→      let data: any;
+   214→      if (token) {
+   215→        data = await api('/api/discord/guilds', { method: 'POST', body: JSON.stringify({ token }) });
+   216→      } else if (bot) {
+   217→        data = await api(`/api/bots/${bot.id}/channels`);
+   218→      } else { setError('Paste token to load channels'); return; }
+   219→      setGuilds(data.guilds || []);
+   220→    } catch (e) { setError((e as Error).message); }
+   221→    finally { setChLoading(false); }
+   222→  };
+   223→
+   224→  const save = async (restart: boolean) => {
+   225→    setError(''); setSaving(true);
+   226→    const body: any = {
+   227→      name, persona, guild_id: guildId, channel_ids: channelIds, delegated_bots: delegatedBots,
+   228→      providers: providers.map(p => {
+   229→        const out: any = { ...p };
+   230→        delete out.api_key_masked;
+   231→        return out;
+   232→      }),
+   233→      gating: { response_probability: prob, skip_patterns: skipPats.split('\n').map(s => s.trim()).filter(Boolean), ignore_bots: ignoreBots, max_context_messages: maxCtx, cooldown_ms: cooldown, response_delay_ms: delay },
+   234→      tools,
+   235→    };
+   236→    if (token) body.token = token;
+   237→    try {
+   238→      if (bot) {
+   239→        await api(`/api/bots/${bot.id}`, { method: 'PUT', body: JSON.stringify(body) });
+   240→        if (restart) await api(`/api/bots/${bot.id}/restart`, { method: 'POST' });
+   241→      } else {
+   242→        await api('/api/bots', { method: 'POST', body: JSON.stringify(body) });
+   243→      }
+   244→      onSaved(); onClose();
+   245→    } catch (e) { setError((e as Error).message); }
+   246→    finally { setSaving(false); }
+   247→  };
+   248→
+   249→  return (
+   250→    <div className="fixed inset-0 z-50 bg-black/70 overflow-y-auto" onClick={onClose}>
+   251→      <div className="bg-card border border-border rounded-2xl w-full max-w-3xl mx-auto my-4 min-h-min" onClick={e => e.stopPropagation()} style={{ maxWidth: '900px' }}>
+   252→        <div className="px-6 py-3 border-b border-border flex items-center justify-between sticky top-0 bg-card z-10 rounded-t-2xl">
+   253→          <h2 className="font-semibold text-sm">{isCreate ? 'Create New Bot' : `Edit: ${esc(name)}`}</h2>
+   254→          <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-xl">×</button>
+   255→        </div>
+   256→        <div className="p-6 space-y-5">
+   257→          {/* Name */}
+   258→          <div><label className="block text-xs text-muted-foreground mb-1">Name *</label>
+   259→            <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Scylla, Mama, Narrator" className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm" /></div>
+   260→          {/* Persona */}
+   261→          <div><label className="block text-xs text-muted-foreground mb-1">Persona (system prompt) *</label>
+   262→            <textarea value={persona} onChange={e => setPersona(e.target.value)} rows={8} placeholder="You are..." className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono" /></div>
+   263→          {/* Token + Load channels */}
+   264→          <div><label className="block text-xs text-muted-foreground mb-1">Discord token {isCreate ? '*' : '(blank = keep existing)'}</label>
+   265→            <div className="flex gap-2">
+   266→              <input type="password" value={token} onChange={e => setToken(e.target.value)} placeholder="MTUzOTE5..." className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono" />
+   267→              <button onClick={loadChannels} disabled={chLoading} className="text-xs bg-primary text-primary-foreground rounded-lg px-3 py-2 whitespace-nowrap disabled:opacity-50">{chLoading ? '...' : '→ Load channels'}</button>
+   268→            </div></div>
+   269→          {/* Guild ID */}
+   270→          <div><label className="block text-xs text-muted-foreground mb-1">Guild ID</label>
+   271→            <input value={guildId} onChange={e => setGuildId(e.target.value)} placeholder="1511640846435356794" className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono" /></div>
+   272→          {/* Channels */}
+   273→          {guilds.length > 0 && (
+   274→            <div><label className="block text-xs text-muted-foreground mb-1">Channels (empty = all)</label>
+   275→              <div className="max-h-48 overflow-y-auto bg-background border border-border rounded-lg p-2 space-y-1">
+   276→                {guilds.map(g => (
+   277→                  <div key={g.id}>
+   278→                    <div className="text-xs font-semibold text-foreground mt-1 mb-1">{esc(g.name)}</div>
+   279→                    {(g.text_channels || []).map((c: any) => (
+   280→                      <label key={c.id} className="flex items-center gap-2 text-xs py-0.5 cursor-pointer hover:bg-muted/30 px-1 rounded">
+   281→                        <input type="checkbox" checked={channelIds.includes(c.id)} onChange={e => {
+   282→                          setChannelIds(e.target.checked ? [...channelIds, c.id] : channelIds.filter(id => id !== c.id));
+   283→                          if (e.target.checked && !guildId) setGuildId(g.id);
+   284→                        }} className="accent-primary" />
+   285→                        <span>#{esc(c.name)}</span>
+   286→                        <span className="text-muted-foreground/50 font-mono ml-auto text-[10px]">{c.id}</span>
+   287→                      </label>
+   288→                    ))}
+   289→                  </div>
+   290→                ))}
+   291→              </div></div>
+   292→          )}
+   293→          {/* Providers */}
+   294→          <div className="border-t border-border pt-4">
+   295→            <div className="flex items-center justify-between mb-2">
+   296→              <h3 className="font-semibold text-sm">Providers (racing)</h3>
+   297→              <button onClick={() => setProviders([...providers, { id: 'p' + Date.now(), name: 'New Provider', type: 'openai', priority: providers.length + 1, enabled: true, proxy_url: '', model: '', temperature: 0.85, max_tokens: 1500 }])} className="text-xs bg-primary text-primary-foreground rounded px-2 py-1">+ Add</button>
+   298→            </div>
+   299→            <div className="space-y-2">
+   300→              {providers.map((p, i) => (
+   301→                <ProviderEditor key={p.id} p={p} onChange={np => setProviders(providers.map((x, idx) => idx === i ? np : x))} onRemove={() => setProviders(providers.filter((_, idx) => idx !== i))} />
+   302→              ))}
+   303→              {providers.length === 0 && <p className="text-xs text-muted-foreground">No providers. Add one to get started.</p>}
+   304→            </div>
+   305→          </div>
+   306→          {/* Gating */}
+   307→          <div className="border-t border-border pt-4">
+   308→            <h3 className="font-semibold text-sm mb-2">Behavior</h3>
+   309→            <div className="space-y-3">
+   310→              <div><label className="text-xs text-muted-foreground">Response probability: {prob}</label>
+   311→                <input type="range" min="0" max="1" step="0.05" value={prob} onChange={e => setProb(parseFloat(e.target.value))} className="w-full accent-primary" /></div>
+   312→              <div><label className="text-xs text-muted-foreground">Skip patterns (one per line)</label>
+   313→                <textarea value={skipPats} onChange={e => setSkipPats(e.target.value)} rows={3} className="w-full bg-background border border-border rounded-lg px-2 py-1 text-sm font-mono" /></div>
+   314→              <div className="grid grid-cols-3 gap-2">
+   315→                <label className="text-xs">Cooldown (ms)<input type="number" value={cooldown} onChange={e => setCooldown(parseInt(e.target.value))} className="w-full bg-background border border-border rounded px-2 py-1 text-sm" /></label>
+   316→                <label className="text-xs">Max context<input type="number" value={maxCtx} onChange={e => setMaxCtx(parseInt(e.target.value))} className="w-full bg-background border border-border rounded px-2 py-1 text-sm" /></label>
+   317→                <label className="text-xs">Delay (ms)<input type="number" value={delay} onChange={e => setDelay(parseInt(e.target.value))} className="w-full bg-background border border-border rounded px-2 py-1 text-sm" /></label>
+   318→              </div>
+   319→              <label className="flex items-center gap-2 text-sm cursor-pointer">
+   320→                <input type="checkbox" checked={ignoreBots} onChange={e => setIgnoreBots(e.target.checked)} className="accent-primary" />
+   321→                Ignore other bots (prevents loops)
+   322→              </label>
+   323→            </div>
+   324→          </div>
+   325→          {/* Tools */}
+   326→          <div className="border-t border-border pt-4">
+   327→            <h3 className="font-semibold text-sm mb-2">Tools</h3>
+   328→            <div className="grid grid-cols-2 gap-2">
+   329→              {Object.keys(TOOL_DESCS).map(k => (
+   330→                <label key={k} className="flex items-center justify-between bg-background border border-border rounded-lg px-3 py-2 cursor-pointer hover:bg-muted/30">
+   331→                  <span className="text-sm">{TOOL_DESCS[k]}</span>
+   332→                  <input type="checkbox" checked={tools[k] ?? false} onChange={e => setTools({ ...tools, [k]: e.target.checked })} className="accent-primary" />
+   333→                </label>
+   334→              ))}
+   335→            </div>
+   336→          </div>
+   337→          {/* Delegated bots */}
+   338→          {allBots.length > 1 && (
+   339→            <div className="border-t border-border pt-4">
+   340→              <h3 className="font-semibold text-sm mb-2">Delegated bots (can summon)</h3>
+   341→              <div className="max-h-32 overflow-y-auto bg-background border border-border rounded-lg p-2 space-y-1">
+   342→                {allBots.filter(b => !bot || b.id !== bot.id).map(other => (
+   343→                  <label key={other.id} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-muted/30 px-1 rounded">
+   344→                    <input type="checkbox" checked={delegatedBots.includes(other.id)} onChange={e => setDelegatedBots(e.target.checked ? [...delegatedBots, other.id] : delegatedBots.filter(id => id !== other.id))} className="accent-primary" />
+   345→                    <span>{esc(other.name)}</span>
+   346→                  </label>
+   347→                ))}
+   348→              </div>
+   349→            </div>
+   350→          )}
+   351→          {error && <div className="text-xs text-red-500 bg-red-500/10 p-2 rounded">{error}</div>}
+   352→        </div>
+   353→        <div className="px-6 py-3 border-t border-border flex gap-2 sticky bottom-0 bg-card rounded-b-2xl">
+   354→          <button onClick={() => save(false)} disabled={saving} className="flex-1 bg-primary text-primary-foreground rounded-lg py-2 text-sm font-medium disabled:opacity-50">{saving ? 'Saving...' : 'Save'}</button>
+   355→          {bot && <button onClick={() => save(true)} disabled={saving || bot.status !== 'running'} className="bg-muted border border-border rounded-lg px-4 py-2 text-sm disabled:opacity-50">Save & Restart</button>}
+   356→          <button onClick={onClose} className="bg-muted border border-border rounded-lg px-4 py-2 text-sm">Cancel</button>
+   357→        </div>
+   358→      </div>
+   359→    </div>
+   360→  );
+   361→}
+   362→
+   363→// ─── Proxies Tab ───────────────────────────────────────────────────────────
+   364→function ProxiesTab() {
+   365→  const [url, setUrl] = useState('https://lolmaobruhhh-fap.hf.space/v1');
+   366→  const [key, setKey] = useState('FAP!');
+   367→  const [model, setModel] = useState('idk:gemini-3.7-flash-high-search');
+   368→  const [result, setResult] = useState<any>(null);
+   369→  const [loading, setLoading] = useState(false);
+   370→  const ping = async () => {
+   371→    setLoading(true); setResult(null);
+   372→    try { const r = await api('/api/llm/ping', { method: 'POST', body: JSON.stringify({ proxy_url: url, api_key: key, model }) }); setResult(r); }
+   373→    catch (e) { setResult({ error: (e as Error).message }); }
+   374→    finally { setLoading(false); }
+   375→  };
+   376→  return (
+   377→    <div className="max-w-2xl space-y-4">
+   378→      <h3 className="font-semibold text-sm">Test LLM Proxy</h3>
+   379→      <input value={url} onChange={e => setUrl(e.target.value)} placeholder="Proxy URL" className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono" />
+   380→      <div className="grid grid-cols-2 gap-2">
+   381→        <input value={key} onChange={e => setKey(e.target.value)} placeholder="API key" className="bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono" />
+   382→        <input value={model} onChange={e => setModel(e.target.value)} placeholder="Model" className="bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono" />
+   383→      </div>
+   384→      <button onClick={ping} disabled={loading} className="bg-primary text-primary-foreground rounded-lg px-4 py-2 text-sm disabled:opacity-50">{loading ? 'Pinging...' : 'Ping'}</button>
+   385→      {result && <pre className="bg-muted/30 border border-border rounded-lg p-3 text-xs font-mono whitespace-pre-wrap max-h-60 overflow-y-auto">{JSON.stringify(result, null, 2)}</pre>}
+   386→    </div>
+   387→  );
+   388→}
+   389→
+   390→// ─── Logs Tab ──────────────────────────────────────────────────────────────
+   391→function LogsTab({ bots }: { bots: Bot[] }) {
+   392→  const [botId, setBotId] = useState('');
+   393→  const [logs, setLogs] = useState<string[]>([]);
+   394→  const [auto, setAuto] = useState(false);
+   395→  const ref = useRef<HTMLPreElement>(null);
+   396→  useEffect(() => { if (bots.length && !botId) setBotId(bots[0].id); }, [bots]);
+   397→  useEffect(() => {
+   398→    if (!botId) return;
+   399→    const fetchLogs = async () => {
+   400→      await new Promise(r => setTimeout(r, 0));
+   401→      try { const r = await api(`/api/bots/${botId}/logs?lines=200`); setLogs((r as any).logs || []); }
+   402→      catch {}
+   403→    };
+   404→    fetchLogs();
+   405→    if (auto) { const t = setInterval(fetchLogs, 3000); return () => clearInterval(t); }
+   406→  }, [botId, auto]);
+   407→  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [logs]);
+   408→  return (
+   409→    <div className="space-y-3">
+   410→      <div className="flex gap-2 items-center">
+   411→        <select value={botId} onChange={e => setBotId(e.target.value)} className="bg-background border border-border rounded-lg px-3 py-2 text-sm">
+   412→          {bots.map(b => <option key={b.id} value={b.id}>{esc(b.name)}</option>)}
+   413→        </select>
+   414→        <label className="text-xs flex items-center gap-1"><input type="checkbox" checked={auto} onChange={e => setAuto(e.target.checked)} className="accent-primary" /> Auto-refresh</label>
+   415→      </div>
+   416→      <pre ref={ref} className="bg-black/40 border border-border rounded-lg p-3 text-xs font-mono h-[600px] overflow-y-auto whitespace-pre-wrap">
+   417→{logs.map(l => { try { const j = JSON.parse(l); return `[${j.ts?.slice(11, 19)}] ${j.level}: ${j.msg}`; } catch { return l; } }).join('\n')}
+   418→      </pre>
+   419→    </div>
+   420→  );
+   421→}
+   422→
+   423→// ─── Main Page ─────────────────────────────────────────────────────────────
+   424→export default function Page() {
+   425→  const [loggedIn, setLoggedIn] = useState(false);
+   426→  const [bots, setBots] = useState<Bot[]>([]);
+   427→  const [loading, setLoading] = useState(true);
+   428→  const [tab, setTab] = useState('bots');
+   429→  const [editing, setEditing] = useState<Bot | null>(null);
+   430→  const [creating, setCreating] = useState(false);
+   431→
+   432→  useEffect(() => { _onUnauthorized = () => setLoggedIn(false); }, []);
+   433→
+   434→  const refresh = useCallback(async () => {
+   435→    try { const data = await api('/api/bots'); setBots((data as any).bots || []); }
+   436→    catch {} finally { setLoading(false); }
+   437→  }, []);
+   438→
+   439→  useEffect(() => {
+   440→    const t = localStorage.getItem('session_token');
+   441→    if (t) { setLoggedIn(true); refresh(); } else { setLoading(false); }
+   442→  }, [refresh]);
+   443→
+   444→  const start = async (id: string) => { try { await api(`/api/bots/${id}/start`, { method: 'POST' }); refresh(); } catch (e) { alert((e as Error).message); } };
+   445→  const stop = async (id: string) => { try { await api(`/api/bots/${id}/stop`, { method: 'POST' }); refresh(); } catch (e) { alert((e as Error).message); } };
+   446→  const restart = async (id: string) => { try { await api(`/api/bots/${id}/restart`, { method: 'POST' }); refresh(); } catch (e) { alert((e as Error).message); } };
+   447→  const del = async (id: string) => { if (!confirm('Delete?')) return; try { await api(`/api/bots/${id}`, { method: 'DELETE' }); refresh(); } catch (e) { alert((e as Error).message); } };
+   448→
+   449→  if (!loggedIn) return <Login onLogin={() => { setLoggedIn(true); refresh(); }} />;
+   450→  if (loading) return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading…</div>;
+   451→
+   452→  return (
+   453→    <div className="min-h-screen bg-background">
+   454→      <header className="border-b border-border bg-card sticky top-0 z-10">
+   455→        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
+   456→          <div className="flex items-center gap-3">
+   457→            <div className="w-8 h-8 rounded-lg bg-primary/15 flex items-center justify-center text-lg">🤖</div>
+   458→            <div><div className="font-semibold text-sm">Bot Fleet</div><div className="text-xs text-muted-foreground">{bots.length} bots · {bots.filter(b => b.status === 'running').length} running</div></div>
+   459→          </div>
+   460→          <div className="flex gap-2">
+   461→            <button onClick={() => setTab('bots')} className={`text-xs px-3 py-1 rounded ${tab === 'bots' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}>Bots</button>
+   462→            <button onClick={() => setTab('proxies')} className={`text-xs px-3 py-1 rounded ${tab === 'proxies' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}>Proxies</button>
+   463→            <button onClick={() => setTab('logs')} className={`text-xs px-3 py-1 rounded ${tab === 'logs' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}>Logs</button>
+   464→            <button onClick={() => { localStorage.removeItem('session_token'); setLoggedIn(false); }} className="text-xs text-muted-foreground px-2">Sign out</button>
+   465→          </div>
+   466→        </div>
+   467→      </header>
+   468→
+   469→      <main className="max-w-7xl mx-auto px-4 py-6">
+   470→        {tab === 'bots' && (
+   471→          <>
+   472→            <div className="flex items-center justify-between mb-4">
+   473→              <h2 className="text-lg font-semibold">Your bots</h2>
+   474→              <button onClick={() => setCreating(true)} className="bg-primary text-primary-foreground text-sm px-4 py-2 rounded-lg">+ New Bot</button>
+   475→            </div>
+   476→            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+   477→              {bots.map(b => (
+   478→                <BotCard key={b.id} bot={b} onEdit={() => setEditing(b)} onStart={() => start(b.id)} onStop={() => stop(b.id)} onRestart={() => restart(b.id)} onDelete={() => del(b.id)} />
+   479→              ))}
+   480→            </div>
+   481→          </>
+   482→        )}
+   483→        {tab === 'proxies' && <ProxiesTab />}
+   484→        {tab === 'logs' && <LogsTab bots={bots} />}
+   485→      </main>
+   486→
+   487→      {(editing || creating) && (
+   488→        <BotEditor bot={editing} allBots={bots} onClose={() => { setEditing(null); setCreating(false); }} onSaved={refresh} />
+   489→      )}
+   490→    </div>
+   491→  );
+   492→}
+   493→

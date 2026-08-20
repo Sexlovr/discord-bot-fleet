@@ -56,6 +56,7 @@ export async function POST(req: NextRequest) {
       ignoreBots: gating?.ignore_bots ?? true,
       maxContextMessages: gating?.max_context_messages ?? 30,
       cooldownMs: gating?.cooldown_ms ?? 1500,
+      responseDelayMs: gating?.response_delay_ms ?? 0,
       toolWebSearch: tools?.web_search ?? true,
       toolPingProxy: tools?.ping_proxy ?? true,
       toolFetchUrl: tools?.fetch_url ?? true,

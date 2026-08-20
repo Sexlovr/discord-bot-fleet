@@ -2,490 +2,1268 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 
+// ─── API helper ────────────────────────────────────────────────────────────
 let _onUnauthorized: (() => void) | null = null;
 
 async function api(path: string, opts: RequestInit = {}) {
   const token = typeof localStorage !== 'undefined' ? localStorage.getItem('session_token') || '' : '';
   const res = await fetch(path, {
     ...opts,
-    headers: { 'Content-Type': 'application/json', 'x-session-token': token, ...(opts.headers as Record<string, string> || {}) },
+    headers: {
+      'Content-Type': 'application/json',
+      'x-session-token': token,
+      ...((opts.headers as Record<string, string>) || {}),
+    },
   });
-  if (res.status === 401) { if (_onUnauthorized) _onUnauthorized(); throw new Error('unauthorized'); }
+  if (res.status === 401) {
+    if (_onUnauthorized) _onUnauthorized();
+    throw new Error('unauthorized');
+  }
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((data as any).error || `HTTP ${res.status}`);
   return data;
 }
 
-function timeAgo(ts: number | string) {
+function esc(s: any): string {
+  return String(s ?? '').replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c] as string)
+  );
+}
+
+function timeAgo(ts?: number) {
   if (!ts) return 'never';
-  const d = new Date(ts);
-  const sec = Math.floor((Date.now() - d.getTime()) / 1000);
+  const sec = Math.floor((Date.now() - ts) / 1000);
   if (sec < 60) return sec + 's ago';
   if (sec < 3600) return Math.floor(sec / 60) + 'm ago';
   if (sec < 86400) return Math.floor(sec / 3600) + 'h ago';
-  return d.toLocaleDateString();
+  return new Date(ts).toLocaleDateString();
 }
 
-function esc(s: any) {
-  return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
-}
-
-// ─── Types ───────────────────────────────────────────────────────────────
+// ─── Types ─────────────────────────────────────────────────────────────────
 interface Provider {
-  id: string; name: string; type: 'openai' | 'zai'; priority: number; enabled: boolean;
-  proxy_url?: string; model?: string; temperature?: number; max_tokens?: number;
-  api_key_masked?: string; zai_thinking?: string;
+  id: string;
+  name: string;
+  type: 'openai' | 'zai';
+  priority: number;
+  enabled: boolean;
+  proxy_url?: string;
+  model?: string;
+  temperature?: number;
+  max_tokens?: number;
+  api_key_masked?: string;
+  zai_thinking?: string;
 }
 
 interface Bot {
-  id: string; name: string; persona: string; status: string; discord_user_id?: string;
-  channel_ids: string[]; delegated_bots: string[];
+  id: string;
+  name: string;
+  persona: string;
+  status: string;
+  discord_user_id?: string;
+  guild_id?: string;
+  channel_ids: string[];
+  delegated_bots: string[];
   providers: Provider[];
-  llm: { proxy_url: string; model: string; temperature: number; max_tokens: number; api_key_masked?: string };
-  gating: { response_probability: number; skip_patterns: string[]; ignore_bots: boolean; max_context_messages: number; cooldown_ms: number; response_delay_ms?: number };
-  tools: Record<string, boolean>;
-  token_masked?: string;
-  updated_at: number;
-}
-
-const DEFAULT_TOOLS: Record<string, boolean> = {
-  web_search: true, ping_proxy: true, fetch_url: true, github_lookup: true,
-  memory: true, schedule_reminder: true, react_to_message: true, summon_bot: false,
-};
-
-const TOOL_DESCS: Record<string, string> = {
-  web_search: 'Search the web', ping_proxy: 'Test LLM proxies', fetch_url: 'Fetch URLs (SSRF-safe)',
-  github_lookup: 'GitHub repo lookup', memory: 'Remember things', schedule_reminder: 'Schedule reminders',
-  react_to_message: 'Add emoji reactions', summon_bot: 'Summon other bots',
-};
-
-// ─── Login ────────────────────────────────────────────────────────────────
-function Login({ onLogin }: { onLogin: () => void }) {
-  const [pw, setPw] = useState(''); const [err, setErr] = useState(''); const [loading, setLoading] = useState(false);
-  const submit = async (e: React.FormEvent) => {
-    e.preventDefault(); setErr(''); setLoading(true);
-    try {
-      const r = await fetch('/api/auth/login', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ password: pw }) });
-      const data = await r.json();
-      if (!r.ok) throw new Error(data.error || 'login failed');
-      localStorage.setItem('session_token', data.token);
-      onLogin();
-    } catch (e) { setErr((e as Error).message); } finally { setLoading(false); }
+  llm: {
+    proxy_url: string;
+    model: string;
+    temperature: number;
+    max_tokens: number;
+    api_key_masked?: string;
   };
-  return (
-    <div className="min-h-screen flex items-center justify-center p-4 bg-background">
-      <div className="w-full max-w-md bg-card border border-border rounded-2xl p-8 shadow-xl">
-        <div className="flex items-center gap-3 mb-6">
-          <div className="w-12 h-12 rounded-xl bg-primary/15 flex items-center justify-center text-2xl">🤖</div>
-          <div><h1 className="text-xl font-bold">Bot Fleet</h1><p className="text-xs text-muted-foreground">Multi-bot Discord control panel</p></div>
-        </div>
-        <form onSubmit={submit} className="space-y-4">
-          <input type="password" value={pw} onChange={e => setPw(e.target.value)} required autoFocus placeholder="Admin password"
-            className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm" />
-          <button type="submit" disabled={loading} className="w-full bg-primary text-primary-foreground rounded-lg py-2 text-sm font-medium disabled:opacity-50">
-            {loading ? 'Signing in…' : 'Sign in'}
-          </button>
-          {err && <div className="text-xs text-red-500">{err}</div>}
-        </form>
-      </div>
-    </div>
-  );
-}
-
-// ─── Bot Card ──────────────────────────────────────────────────────────────
-function BotCard({ bot, onEdit, onStart, onStop, onRestart, onDelete }: any) {
-  const activeP = bot.providers?.filter((p: Provider) => p.enabled).length || 0;
-  const emoji = bot.name?.toLowerCase().includes('yuki') ? '🌸' : bot.name?.toLowerCase().includes('hana') ? '📚' : bot.name?.toLowerCase().includes('scylla') ? '🐙' : '🤖';
-  return (
-    <div className="bg-card border border-border rounded-2xl p-5 hover:border-primary/50 transition">
-      <div className="flex items-start justify-between mb-3">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-gradient-to-br from-primary/30 to-primary/5 flex items-center justify-center text-lg">{emoji}</div>
-          <div><div className="font-semibold text-sm">{esc(bot.name)}</div><div className="text-xs text-muted-foreground font-mono">{bot.id}</div></div>
-        </div>
-        <span className="flex items-center gap-2 text-xs">
-          <span className={`inline-block w-2 h-2 rounded-full ${bot.status === 'running' ? 'bg-green-500 animate-pulse' : bot.status === 'error' ? 'bg-red-500' : 'bg-gray-500'}`}></span>
-          {bot.status}
-        </span>
-      </div>
-      <div className="space-y-1 text-xs text-muted-foreground mb-3">
-        <div>Providers: <span className="text-foreground">{activeP} active</span></div>
-        <div>Channels: <span className="text-foreground">{bot.channel_ids?.length || 0}</span></div>
-        {bot.providers?.map((p: Provider) => <div key={p.id} className="text-[10px] text-muted-foreground/60">· {p.name}: {p.model || '?'}</div>)}
-        <div>Updated: {timeAgo(bot.updated_at)}</div>
-      </div>
-      <div className="flex gap-1 pt-3 border-t border-border">
-        {bot.status === 'running' ? (
-          <><button onClick={onStop} className="flex-1 text-xs bg-muted hover:bg-yellow-500/20 hover:text-yellow-600 border border-border rounded-lg py-1.5">Stop</button>
-            <button onClick={onRestart} className="flex-1 text-xs bg-muted hover:bg-blue-500/20 hover:text-blue-400 border border-border rounded-lg py-1.5">↻</button></>
-        ) : (
-          <button onClick={onStart} className="flex-1 text-xs bg-muted hover:bg-green-500/20 hover:text-green-600 border border-border rounded-lg py-1.5">Start</button>
-        )}
-        <button onClick={onEdit} className="flex-1 text-xs bg-muted hover:bg-primary/20 hover:text-primary border border-border rounded-lg py-1.5">Edit</button>
-        <button onClick={onDelete} className="text-xs bg-muted hover:bg-red-500/20 hover:text-red-600 border border-border rounded-lg px-3 py-1.5">Del</button>
-      </div>
-    </div>
-  );
-}
-
-// ─── Provider Editor ───────────────────────────────────────────────────────
-function ProviderEditor({ p, onChange, onRemove }: { p: Provider; onChange: (p: Provider) => void; onRemove: () => void }) {
-  return (
-    <div className="border border-border rounded-lg p-3 space-y-2 bg-background/50">
-      <div className="flex items-center gap-2">
-        <input value={p.name} onChange={e => onChange({ ...p, name: e.target.value })} placeholder="Provider name"
-          className="flex-1 bg-background border border-border rounded px-2 py-1 text-sm" />
-        <select value={p.type} onChange={e => onChange({ ...p, type: e.target.value as 'openai' | 'zai' })}
-          className="bg-background border border-border rounded px-2 py-1 text-sm">
-          <option value="openai">openai</option>
-          <option value="zai">zai</option>
-        </select>
-        <button onClick={() => onChange({ ...p, enabled: !p.enabled })} className={`px-2 py-1 text-xs rounded border ${p.enabled ? 'bg-green-500/20 text-green-500 border-green-500/30' : 'bg-muted text-muted-foreground border-border'}`}>{p.enabled ? 'ON' : 'OFF'}</button>
-        <button onClick={onRemove} className="px-2 py-1 text-xs rounded border bg-red-500/20 text-red-500 border-red-500/30">×</button>
-      </div>
-      {p.type === 'openai' && (
-        <input value={p.proxy_url || ''} onChange={e => onChange({ ...p, proxy_url: e.target.value })} placeholder="Proxy URL"
-          className="w-full bg-background border border-border rounded px-2 py-1 text-sm font-mono" />
-      )}
-      <div className="grid grid-cols-2 gap-2">
-        <input value={p.model || ''} onChange={e => onChange({ ...p, model: e.target.value })} placeholder="Model"
-          className="bg-background border border-border rounded px-2 py-1 text-sm font-mono" />
-        <input value={p.api_key_masked === 'set' ? '••••' : ''} onChange={e => onChange({ ...p, api_key_masked: e.target.value ? 'new' : 'unset' } as any)} placeholder="API key (blank=keep)"
-          className="bg-background border border-border rounded px-2 py-1 text-sm font-mono" />
-      </div>
-      <div className="grid grid-cols-3 gap-2">
-        <label className="text-xs">Temp: <input type="number" step="0.05" min="0" max="2" value={p.temperature ?? 0.85} onChange={e => onChange({ ...p, temperature: parseFloat(e.target.value) })} className="w-full bg-background border border-border rounded px-1 py-0.5 text-xs" /></label>
-        <label className="text-xs">Max tok: <input type="number" min="50" max="8000" value={p.max_tokens ?? 1500} onChange={e => onChange({ ...p, max_tokens: parseInt(e.target.value) })} className="w-full bg-background border border-border rounded px-1 py-0.5 text-xs" /></label>
-        <label className="text-xs">Priority: <input type="number" min="1" max="10" value={p.priority ?? 1} onChange={e => onChange({ ...p, priority: parseInt(e.target.value) })} className="w-full bg-background border border-border rounded px-1 py-0.5 text-xs" /></label>
-      </div>
-      {p.type === 'zai' && (
-        <label className="text-xs flex items-center gap-2">Thinking: <select value={p.zai_thinking || 'disabled'} onChange={e => onChange({ ...p, zai_thinking: e.target.value })} className="bg-background border border-border rounded px-1 py-0.5 text-xs"><option value="disabled">disabled</option><option value="enabled">enabled</option></select></label>
-      )}
-    </div>
-  );
-}
-
-// ─── Bot Editor ───────────────────────────────────────────────────────────
-function BotEditor({ bot, allBots, onClose, onSaved }: { bot: Bot | null; allBots: Bot[]; onClose: () => void; onSaved: () => void }) {
-  const isCreate = !bot;
-  const [name, setName] = useState('');
-  const [persona, setPersona] = useState('');
-  const [token, setToken] = useState('');
-  const [guildId, setGuildId] = useState('');
-  const [channelIds, setChannelIds] = useState<string[]>([]);
-  const [providers, setProviders] = useState<Provider[]>([]);
-  const [prob, setProb] = useState(1.0);
-  const [skipPats, setSkipPats] = useState('^\\+$\n^-$\n^(k|kk)$');
-  const [cooldown, setCooldown] = useState(2000);
-  const [maxCtx, setMaxCtx] = useState(1000000);
-  const [delay, setDelay] = useState(0);
-  const [ignoreBots, setIgnoreBots] = useState(false);
-  const [tools, setTools] = useState({ ...DEFAULT_TOOLS });
-  const [delegatedBots, setDelegatedBots] = useState<string[]>([]);
-  const [guilds, setGuilds] = useState<any[]>([]);
-  const [chLoading, setChLoading] = useState(false);
-  const [error, setError] = useState('');
-  const [saving, setSaving] = useState(false);
-
-  useEffect(() => {
-    if (!bot) return;
-    api(`/api/bots/${bot.id}`).then((b: any) => {
-      setName(b.name || ''); setPersona(b.persona || ''); setGuildId(b.guild_id || '');
-      setChannelIds(b.channel_ids || []); setProviders(b.providers || []);
-      setProb(b.gating?.response_probability ?? 1.0);
-      setSkipPats((b.gating?.skip_patterns || ['^\\+$', '^-$', '^(k|kk)$']).join('\n'));
-      setCooldown(b.gating?.cooldown_ms ?? 2000);
-      setMaxCtx(b.gating?.max_context_messages ?? 1000000);
-      setDelay(b.gating?.response_delay_ms ?? 0);
-      setIgnoreBots(b.gating?.ignore_bots ?? false);
-      setTools({ ...DEFAULT_TOOLS, ...(b.tools || {}) });
-      setDelegatedBots(b.delegated_bots || []);
-    }).catch((e: any) => setError(e.message));
-    // Auto-load channels
-    api(`/api/bots/${bot.id}/channels`).then((data: any) => {
-      if (data.guilds) setGuilds(data.guilds);
-    }).catch(() => {});
-  }, [bot]);
-
-  const loadChannels = async () => {
-    setChLoading(true); setError('');
-    try {
-      let data: any;
-      if (token) {
-        data = await api('/api/discord/guilds', { method: 'POST', body: JSON.stringify({ token }) });
-      } else if (bot) {
-        data = await api(`/api/bots/${bot.id}/channels`);
-      } else { setError('Paste token to load channels'); return; }
-      setGuilds(data.guilds || []);
-    } catch (e) { setError((e as Error).message); }
-    finally { setChLoading(false); }
+  gating: {
+    response_probability: number;
+    skip_patterns: string[];
+    ignore_bots: boolean;
+    max_context_messages: number;
+    cooldown_ms: number;
+    response_delay_ms: number;
   };
-
-  const save = async (restart: boolean) => {
-    setError(''); setSaving(true);
-    const body: any = {
-      name, persona, guild_id: guildId, channel_ids: channelIds, delegated_bots: delegatedBots,
-      providers: providers.map(p => {
-        const out: any = { ...p };
-        delete out.api_key_masked;
-        return out;
-      }),
-      gating: { response_probability: prob, skip_patterns: skipPats.split('\n').map(s => s.trim()).filter(Boolean), ignore_bots: ignoreBots, max_context_messages: maxCtx, cooldown_ms: cooldown, response_delay_ms: delay },
-      tools,
-    };
-    if (token) body.token = token;
-    try {
-      if (bot) {
-        await api(`/api/bots/${bot.id}`, { method: 'PUT', body: JSON.stringify(body) });
-        if (restart) await api(`/api/bots/${bot.id}/restart`, { method: 'POST' });
-      } else {
-        await api('/api/bots', { method: 'POST', body: JSON.stringify(body) });
-      }
-      onSaved(); onClose();
-    } catch (e) { setError((e as Error).message); }
-    finally { setSaving(false); }
+  tools: {
+    web_search: boolean;
+    ping_proxy: boolean;
+    fetch_url: boolean;
+    github_lookup: boolean;
+    memory: boolean;
+    schedule_reminder: boolean;
+    react_to_message: boolean;
+    summon_bot: boolean;
   };
-
-  return (
-    <div className="fixed inset-0 z-50 bg-black/70 overflow-y-auto" onClick={onClose}>
-      <div className="bg-card border border-border rounded-2xl w-full max-w-3xl mx-auto my-4 min-h-min" onClick={e => e.stopPropagation()} style={{ maxWidth: '900px' }}>
-        <div className="px-6 py-3 border-b border-border flex items-center justify-between sticky top-0 bg-card z-10 rounded-t-2xl">
-          <h2 className="font-semibold text-sm">{isCreate ? 'Create New Bot' : `Edit: ${esc(name)}`}</h2>
-          <button onClick={onClose} className="text-muted-foreground hover:text-foreground text-xl">×</button>
-        </div>
-        <div className="p-6 space-y-5">
-          {/* Name */}
-          <div><label className="block text-xs text-muted-foreground mb-1">Name *</label>
-            <input value={name} onChange={e => setName(e.target.value)} placeholder="e.g. Scylla, Mama, Narrator" className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm" /></div>
-          {/* Persona */}
-          <div><label className="block text-xs text-muted-foreground mb-1">Persona (system prompt) *</label>
-            <textarea value={persona} onChange={e => setPersona(e.target.value)} rows={8} placeholder="You are..." className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono" /></div>
-          {/* Token + Load channels */}
-          <div><label className="block text-xs text-muted-foreground mb-1">Discord token {isCreate ? '*' : '(blank = keep existing)'}</label>
-            <div className="flex gap-2">
-              <input type="password" value={token} onChange={e => setToken(e.target.value)} placeholder="MTUzOTE5..." className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono" />
-              <button onClick={loadChannels} disabled={chLoading} className="text-xs bg-primary text-primary-foreground rounded-lg px-3 py-2 whitespace-nowrap disabled:opacity-50">{chLoading ? '...' : '→ Load channels'}</button>
-            </div></div>
-          {/* Guild ID */}
-          <div><label className="block text-xs text-muted-foreground mb-1">Guild ID</label>
-            <input value={guildId} onChange={e => setGuildId(e.target.value)} placeholder="1511640846435356794" className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono" /></div>
-          {/* Channels */}
-          {guilds.length > 0 && (
-            <div><label className="block text-xs text-muted-foreground mb-1">Channels (empty = all)</label>
-              <div className="max-h-48 overflow-y-auto bg-background border border-border rounded-lg p-2 space-y-1">
-                {guilds.map(g => (
-                  <div key={g.id}>
-                    <div className="text-xs font-semibold text-foreground mt-1 mb-1">{esc(g.name)}</div>
-                    {(g.text_channels || []).map((c: any) => (
-                      <label key={c.id} className="flex items-center gap-2 text-xs py-0.5 cursor-pointer hover:bg-muted/30 px-1 rounded">
-                        <input type="checkbox" checked={channelIds.includes(c.id)} onChange={e => {
-                          setChannelIds(e.target.checked ? [...channelIds, c.id] : channelIds.filter(id => id !== c.id));
-                          if (e.target.checked && !guildId) setGuildId(g.id);
-                        }} className="accent-primary" />
-                        <span>#{esc(c.name)}</span>
-                        <span className="text-muted-foreground/50 font-mono ml-auto text-[10px]">{c.id}</span>
-                      </label>
-                    ))}
-                  </div>
-                ))}
-              </div></div>
-          )}
-          {/* Providers */}
-          <div className="border-t border-border pt-4">
-            <div className="flex items-center justify-between mb-2">
-              <h3 className="font-semibold text-sm">Providers (racing)</h3>
-              <button onClick={() => setProviders([...providers, { id: 'p' + Date.now(), name: 'New Provider', type: 'openai', priority: providers.length + 1, enabled: true, proxy_url: '', model: '', temperature: 0.85, max_tokens: 1500 }])} className="text-xs bg-primary text-primary-foreground rounded px-2 py-1">+ Add</button>
-            </div>
-            <div className="space-y-2">
-              {providers.map((p, i) => (
-                <ProviderEditor key={p.id} p={p} onChange={np => setProviders(providers.map((x, idx) => idx === i ? np : x))} onRemove={() => setProviders(providers.filter((_, idx) => idx !== i))} />
-              ))}
-              {providers.length === 0 && <p className="text-xs text-muted-foreground">No providers. Add one to get started.</p>}
-            </div>
-          </div>
-          {/* Gating */}
-          <div className="border-t border-border pt-4">
-            <h3 className="font-semibold text-sm mb-2">Behavior</h3>
-            <div className="space-y-3">
-              <div><label className="text-xs text-muted-foreground">Response probability: {prob}</label>
-                <input type="range" min="0" max="1" step="0.05" value={prob} onChange={e => setProb(parseFloat(e.target.value))} className="w-full accent-primary" /></div>
-              <div><label className="text-xs text-muted-foreground">Skip patterns (one per line)</label>
-                <textarea value={skipPats} onChange={e => setSkipPats(e.target.value)} rows={3} className="w-full bg-background border border-border rounded-lg px-2 py-1 text-sm font-mono" /></div>
-              <div className="grid grid-cols-3 gap-2">
-                <label className="text-xs">Cooldown (ms)<input type="number" value={cooldown} onChange={e => setCooldown(parseInt(e.target.value))} className="w-full bg-background border border-border rounded px-2 py-1 text-sm" /></label>
-                <label className="text-xs">Max context<input type="number" value={maxCtx} onChange={e => setMaxCtx(parseInt(e.target.value))} className="w-full bg-background border border-border rounded px-2 py-1 text-sm" /></label>
-                <label className="text-xs">Delay (ms)<input type="number" value={delay} onChange={e => setDelay(parseInt(e.target.value))} className="w-full bg-background border border-border rounded px-2 py-1 text-sm" /></label>
-              </div>
-              <label className="flex items-center gap-2 text-sm cursor-pointer">
-                <input type="checkbox" checked={ignoreBots} onChange={e => setIgnoreBots(e.target.checked)} className="accent-primary" />
-                Ignore other bots (prevents loops)
-              </label>
-            </div>
-          </div>
-          {/* Tools */}
-          <div className="border-t border-border pt-4">
-            <h3 className="font-semibold text-sm mb-2">Tools</h3>
-            <div className="grid grid-cols-2 gap-2">
-              {Object.keys(TOOL_DESCS).map(k => (
-                <label key={k} className="flex items-center justify-between bg-background border border-border rounded-lg px-3 py-2 cursor-pointer hover:bg-muted/30">
-                  <span className="text-sm">{TOOL_DESCS[k]}</span>
-                  <input type="checkbox" checked={tools[k] ?? false} onChange={e => setTools({ ...tools, [k]: e.target.checked })} className="accent-primary" />
-                </label>
-              ))}
-            </div>
-          </div>
-          {/* Delegated bots */}
-          {allBots.length > 1 && (
-            <div className="border-t border-border pt-4">
-              <h3 className="font-semibold text-sm mb-2">Delegated bots (can summon)</h3>
-              <div className="max-h-32 overflow-y-auto bg-background border border-border rounded-lg p-2 space-y-1">
-                {allBots.filter(b => !bot || b.id !== bot.id).map(other => (
-                  <label key={other.id} className="flex items-center gap-2 text-xs cursor-pointer hover:bg-muted/30 px-1 rounded">
-                    <input type="checkbox" checked={delegatedBots.includes(other.id)} onChange={e => setDelegatedBots(e.target.checked ? [...delegatedBots, other.id] : delegatedBots.filter(id => id !== other.id))} className="accent-primary" />
-                    <span>{esc(other.name)}</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
-          {error && <div className="text-xs text-red-500 bg-red-500/10 p-2 rounded">{error}</div>}
-        </div>
-        <div className="px-6 py-3 border-t border-border flex gap-2 sticky bottom-0 bg-card rounded-b-2xl">
-          <button onClick={() => save(false)} disabled={saving} className="flex-1 bg-primary text-primary-foreground rounded-lg py-2 text-sm font-medium disabled:opacity-50">{saving ? 'Saving...' : 'Save'}</button>
-          {bot && <button onClick={() => save(true)} disabled={saving || bot.status !== 'running'} className="bg-muted border border-border rounded-lg px-4 py-2 text-sm disabled:opacity-50">Save & Restart</button>}
-          <button onClick={onClose} className="bg-muted border border-border rounded-lg px-4 py-2 text-sm">Cancel</button>
-        </div>
-      </div>
-    </div>
-  );
+  created_at?: number;
+  updated_at?: number;
 }
 
-// ─── Proxies Tab ───────────────────────────────────────────────────────────
-function ProxiesTab() {
-  const [url, setUrl] = useState('https://lolmaobruhhh-fap.hf.space/v1');
-  const [key, setKey] = useState('FAP!');
-  const [model, setModel] = useState('idk:gemini-3.7-flash-high-search');
-  const [result, setResult] = useState<any>(null);
-  const [loading, setLoading] = useState(false);
-  const ping = async () => {
-    setLoading(true); setResult(null);
-    try { const r = await api('/api/llm/ping', { method: 'POST', body: JSON.stringify({ proxy_url: url, api_key: key, model }) }); setResult(r); }
-    catch (e) { setResult({ error: (e as Error).message }); }
-    finally { setLoading(false); }
+interface GuildInfo {
+  id: string;
+  name: string;
+  icon: string | null;
+  text_channels: Array<{ id: string; name: string; topic?: string | null }>;
+}
+
+// ─── Default bot factory ────────────────────────────────────────────────────
+function emptyProvider(id: string): Provider {
+  return {
+    id,
+    name: 'Provider',
+    type: 'openai',
+    priority: 1,
+    enabled: true,
+    proxy_url: 'https://lolmaobruhhh-fap.hf.space/v1',
+    model: 'idk:gemini-3.6-flash-high-search',
+    temperature: 0.85,
+    max_tokens: 1500,
   };
-  return (
-    <div className="max-w-2xl space-y-4">
-      <h3 className="font-semibold text-sm">Test LLM Proxy</h3>
-      <input value={url} onChange={e => setUrl(e.target.value)} placeholder="Proxy URL" className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono" />
-      <div className="grid grid-cols-2 gap-2">
-        <input value={key} onChange={e => setKey(e.target.value)} placeholder="API key" className="bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono" />
-        <input value={model} onChange={e => setModel(e.target.value)} placeholder="Model" className="bg-background border border-border rounded-lg px-3 py-2 text-sm font-mono" />
-      </div>
-      <button onClick={ping} disabled={loading} className="bg-primary text-primary-foreground rounded-lg px-4 py-2 text-sm disabled:opacity-50">{loading ? 'Pinging...' : 'Ping'}</button>
-      {result && <pre className="bg-muted/30 border border-border rounded-lg p-3 text-xs font-mono whitespace-pre-wrap max-h-60 overflow-y-auto">{JSON.stringify(result, null, 2)}</pre>}
-    </div>
-  );
 }
 
-// ─── Logs Tab ──────────────────────────────────────────────────────────────
-function LogsTab({ bots }: { bots: Bot[] }) {
-  const [botId, setBotId] = useState('');
-  const [logs, setLogs] = useState<string[]>([]);
-  const [auto, setAuto] = useState(false);
-  const ref = useRef<HTMLPreElement>(null);
-  useEffect(() => { if (bots.length && !botId) setBotId(bots[0].id); }, [bots]);
-  useEffect(() => {
-    if (!botId) return;
-    const fetchLogs = async () => {
-      await new Promise(r => setTimeout(r, 0));
-      try { const r = await api(`/api/bots/${botId}/logs?lines=200`); setLogs((r as any).logs || []); }
-      catch {}
-    };
-    fetchLogs();
-    if (auto) { const t = setInterval(fetchLogs, 3000); return () => clearInterval(t); }
-  }, [botId, auto]);
-  useEffect(() => { if (ref.current) ref.current.scrollTop = ref.current.scrollHeight; }, [logs]);
-  return (
-    <div className="space-y-3">
-      <div className="flex gap-2 items-center">
-        <select value={botId} onChange={e => setBotId(e.target.value)} className="bg-background border border-border rounded-lg px-3 py-2 text-sm">
-          {bots.map(b => <option key={b.id} value={b.id}>{esc(b.name)}</option>)}
-        </select>
-        <label className="text-xs flex items-center gap-1"><input type="checkbox" checked={auto} onChange={e => setAuto(e.target.checked)} className="accent-primary" /> Auto-refresh</label>
-      </div>
-      <pre ref={ref} className="bg-black/40 border border-border rounded-lg p-3 text-xs font-mono h-[600px] overflow-y-auto whitespace-pre-wrap">
-{logs.map(l => { try { const j = JSON.parse(l); return `[${j.ts?.slice(11, 19)}] ${j.level}: ${j.msg}`; } catch { return l; } }).join('\n')}
-      </pre>
-    </div>
-  );
+function emptyBot(): Bot {
+  return {
+    id: '',
+    name: '',
+    persona: '',
+    status: 'stopped',
+    guild_id: '',
+    channel_ids: [],
+    delegated_bots: [],
+    providers: [emptyProvider('p1')],
+    llm: {
+      proxy_url: 'https://lolmaobruhhh-fap.hf.space/v1',
+      model: 'idk:gemini-3.6-flash-high-search',
+      temperature: 0.85,
+      max_tokens: 1500,
+    },
+    gating: {
+      response_probability: 1,
+      skip_patterns: ['^\\+$', '^-$', '^(k|kk)$'],
+      ignore_bots: false,
+      max_context_messages: 30,
+      cooldown_ms: 2000,
+      response_delay_ms: 0,
+    },
+    tools: {
+      web_search: true,
+      ping_proxy: true,
+      fetch_url: true,
+      github_lookup: true,
+      memory: true,
+      schedule_reminder: true,
+      react_to_message: true,
+      summon_bot: false,
+    },
+  };
 }
 
-// ─── Main Page ─────────────────────────────────────────────────────────────
-export default function Page() {
-  const [loggedIn, setLoggedIn] = useState(false);
+// ─── Main app ───────────────────────────────────────────────────────────────
+export default function Home() {
+  const [authed, setAuthed] = useState(false);
+  const [pw, setPw] = useState('');
+  const [loginErr, setLoginErr] = useState('');
+  const [tab, setTab] = useState<'bots' | 'proxies' | 'logs'>('bots');
   const [bots, setBots] = useState<Bot[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [tab, setTab] = useState('bots');
-  const [editing, setEditing] = useState<Bot | null>(null);
-  const [creating, setCreating] = useState(false);
+  const [loading, setLoading] = useState(false);
+  const [toast, setToast] = useState<{ msg: string; kind: 'ok' | 'err' } | null>(null);
+  const [editor, setEditor] = useState<{ bot: Bot; isNew: boolean } | null>(null);
 
-  useEffect(() => { _onUnauthorized = () => setLoggedIn(false); }, []);
+  _onUnauthorized = () => {
+    setAuthed(false);
+    localStorage.removeItem('session_token');
+  };
 
-  const refresh = useCallback(async () => {
-    try { const data = await api('/api/bots'); setBots((data as any).bots || []); }
-    catch {} finally { setLoading(false); }
+  // Toast helper
+  const flash = useCallback((msg: string, kind: 'ok' | 'err' = 'ok') => {
+    setToast({ msg, kind });
+    setTimeout(() => setToast(null), 3500);
+  }, []);
+
+  // Login
+  async function doLogin(e: React.FormEvent) {
+    e.preventDefault();
+    setLoginErr('');
+    try {
+      const r = (await api('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ password: pw }),
+      })) as { token: string };
+      localStorage.setItem('session_token', r.token);
+      setAuthed(true);
+      setPw('');
+    } catch (e: any) {
+      setLoginErr(e.message || 'Login failed');
+    }
+  }
+
+  function signOut() {
+    api('/api/auth/logout', { method: 'POST' }).catch(() => {});
+    localStorage.removeItem('session_token');
+    setAuthed(false);
+  }
+
+  // Load bots list
+  const loadBots = useCallback(async () => {
+    setLoading(true);
+    try {
+      const r = (await api('/api/bots')) as { bots: Bot[] };
+      setBots(r.bots || []);
+    } catch {
+      /* unauthorized handled globally */
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
   useEffect(() => {
-    const t = localStorage.getItem('session_token');
-    if (t) { setLoggedIn(true); refresh(); } else { setLoading(false); }
-  }, [refresh]);
+    if (authed) loadBots();
+  }, [authed, loadBots]);
 
-  const start = async (id: string) => { try { await api(`/api/bots/${id}/start`, { method: 'POST' }); refresh(); } catch (e) { alert((e as Error).message); } };
-  const stop = async (id: string) => { try { await api(`/api/bots/${id}/stop`, { method: 'POST' }); refresh(); } catch (e) { alert((e as Error).message); } };
-  const restart = async (id: string) => { try { await api(`/api/bots/${id}/restart`, { method: 'POST' }); refresh(); } catch (e) { alert((e as Error).message); } };
-  const del = async (id: string) => { if (!confirm('Delete?')) return; try { await api(`/api/bots/${id}`, { method: 'DELETE' }); refresh(); } catch (e) { alert((e as Error).message); } };
+  // ─── Login screen ──────────────────────────────────────────────────────────
+  if (!authed) {
+    return (
+      <div className="min-h-screen flex items-center justify-center bg-background text-foreground p-4">
+        <div className="w-full max-w-sm space-y-4">
+          <div className="text-center">
+            <h1 className="text-2xl font-bold">Discord Bot Fleet</h1>
+            <p className="text-sm text-muted-foreground mt-1">Sign in with admin password</p>
+          </div>
+          <form onSubmit={doLogin} className="space-y-3">
+            <input
+              type="password"
+              placeholder="Admin password"
+              value={pw}
+              onChange={(e) => setPw(e.target.value)}
+              className="w-full px-3 py-2 rounded-md bg-card border border-border focus:outline-none focus:ring-2 focus:ring-ring"
+              autoFocus
+            />
+            {loginErr && <div className="text-sm text-destructive">{esc(loginErr)}</div>}
+            <button
+              type="submit"
+              className="w-full px-4 py-2 rounded-md bg-primary text-primary-foreground font-medium hover:opacity-90"
+            >
+              Sign in
+            </button>
+          </form>
+        </div>
+      </div>
+    );
+  }
 
-  if (!loggedIn) return <Login onLogin={() => { setLoggedIn(true); refresh(); }} />;
-  if (loading) return <div className="min-h-screen flex items-center justify-center text-muted-foreground">Loading…</div>;
-
+  // ─── Main panel ─────────────────────────────────────────────────────────────
   return (
-    <div className="min-h-screen bg-background">
-      <header className="border-b border-border bg-card sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-4 py-3 flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-primary/15 flex items-center justify-center text-lg">🤖</div>
-            <div><div className="font-semibold text-sm">Bot Fleet</div><div className="text-xs text-muted-foreground">{bots.length} bots · {bots.filter(b => b.status === 'running').length} running</div></div>
+    <div className="min-h-screen bg-background text-foreground">
+      {/* Header */}
+      <header className="sticky top-0 z-30 border-b border-border bg-background/95 backdrop-blur">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-4">
+            <h1 className="font-bold text-lg">Discord Bot Fleet</h1>
+            <span className="text-xs px-2 py-0.5 rounded-full bg-muted text-muted-foreground">
+              {bots.length} bot{bots.length === 1 ? '' : 's'}
+            </span>
           </div>
-          <div className="flex gap-2">
-            <button onClick={() => setTab('bots')} className={`text-xs px-3 py-1 rounded ${tab === 'bots' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}>Bots</button>
-            <button onClick={() => setTab('proxies')} className={`text-xs px-3 py-1 rounded ${tab === 'proxies' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}>Proxies</button>
-            <button onClick={() => setTab('logs')} className={`text-xs px-3 py-1 rounded ${tab === 'logs' ? 'bg-primary text-primary-foreground' : 'text-muted-foreground'}`}>Logs</button>
-            <button onClick={() => { localStorage.removeItem('session_token'); setLoggedIn(false); }} className="text-xs text-muted-foreground px-2">Sign out</button>
-          </div>
+          <nav className="flex items-center gap-1">
+            {(['bots', 'proxies', 'logs'] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className={
+                  'px-3 py-1.5 rounded-md text-sm font-medium capitalize transition ' +
+                  (tab === t ? 'bg-primary text-primary-foreground' : 'text-muted-foreground hover:bg-muted')
+                }
+              >
+                {t}
+              </button>
+            ))}
+            <button
+              onClick={signOut}
+              className="ml-2 px-3 py-1.5 rounded-md text-sm font-medium border border-border hover:bg-muted"
+            >
+              Sign out
+            </button>
+          </nav>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-4 py-6">
+      <main className="max-w-6xl mx-auto px-4 py-6">
         {tab === 'bots' && (
-          <>
-            <div className="flex items-center justify-between mb-4">
-              <h2 className="text-lg font-semibold">Your bots</h2>
-              <button onClick={() => setCreating(true)} className="bg-primary text-primary-foreground text-sm px-4 py-2 rounded-lg">+ New Bot</button>
-            </div>
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-              {bots.map(b => (
-                <BotCard key={b.id} bot={b} onEdit={() => setEditing(b)} onStart={() => start(b.id)} onStop={() => stop(b.id)} onRestart={() => restart(b.id)} onDelete={() => del(b.id)} />
-              ))}
-            </div>
-          </>
+          <BotsTab
+            bots={bots}
+            loading={loading}
+            onRefresh={loadBots}
+            onEdit={(b) => setEditor({ bot: JSON.parse(JSON.stringify(b)), isNew: false })}
+            onCreate={() => setEditor({ bot: emptyBot(), isNew: true })}
+            onAction={async (b, action) => {
+              try {
+                await api(`/api/bots/${b.id}/${action}`, { method: 'POST' });
+                flash(`${action} OK for ${b.name}`, 'ok');
+                await loadBots();
+              } catch (e: any) {
+                flash(`${action} failed: ${e.message}`, 'err');
+              }
+            }}
+            onDelete={async (b) => {
+              if (!confirm(`Delete bot "${b.name}"?`)) return;
+              try {
+                await api(`/api/bots/${b.id}`, { method: 'DELETE' });
+                flash(`Deleted ${b.name}`, 'ok');
+                await loadBots();
+              } catch (e: any) {
+                flash(`Delete failed: ${e.message}`, 'err');
+              }
+            }}
+          />
         )}
         {tab === 'proxies' && <ProxiesTab />}
         {tab === 'logs' && <LogsTab bots={bots} />}
       </main>
 
-      {(editing || creating) && (
-        <BotEditor bot={editing} allBots={bots} onClose={() => { setEditing(null); setCreating(false); }} onSaved={refresh} />
+      {editor && (
+        <BotEditor
+          bot={editor.bot}
+          isNew={editor.isNew}
+          allBots={bots}
+          onClose={() => setEditor(null)}
+          flash={flash}
+          onDone={async () => {
+            setEditor(null);
+            await loadBots();
+          }}
+        />
+      )}
+
+      {toast && (
+        <div
+          className={
+            'fixed bottom-4 right-4 z-[60] px-4 py-2 rounded-md shadow-lg text-sm ' +
+            (toast.kind === 'ok' ? 'bg-primary text-primary-foreground' : 'bg-destructive text-white')
+          }
+        >
+          {esc(toast.msg)}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Bots tab ──────────────────────────────────────────────────────────────
+function BotsTab({
+  bots,
+  loading,
+  onRefresh,
+  onEdit,
+  onCreate,
+  onAction,
+  onDelete,
+}: {
+  bots: Bot[];
+  loading: boolean;
+  onRefresh: () => void;
+  onEdit: (b: Bot) => void;
+  onCreate: () => void;
+  onAction: (b: Bot, action: 'start' | 'stop' | 'restart') => void;
+  onDelete: (b: Bot) => void;
+}) {
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-4">
+        <h2 className="text-xl font-semibold">Bots</h2>
+        <div className="flex gap-2">
+          <button
+            onClick={onRefresh}
+            className="px-3 py-1.5 rounded-md border border-border text-sm hover:bg-muted"
+          >
+            Refresh
+          </button>
+          <button
+            onClick={onCreate}
+            className="px-3 py-1.5 rounded-md bg-primary text-primary-foreground text-sm font-medium"
+          >
+            + New bot
+          </button>
+        </div>
+      </div>
+
+      {loading && bots.length === 0 ? (
+        <div className="text-muted-foreground text-sm">Loading…</div>
+      ) : bots.length === 0 ? (
+        <div className="text-muted-foreground text-sm">No bots yet. Click "New bot" to create one.</div>
+      ) : (
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
+          {bots.map((b) => (
+            <div key={b.id} className="rounded-xl border border-border bg-card p-4 flex flex-col gap-3">
+              <div className="flex items-start justify-between gap-2">
+                <div className="min-w-0">
+                  <div className="font-semibold truncate">{esc(b.name)}</div>
+                  <div className="text-xs text-muted-foreground font-mono">{esc(b.id)}</div>
+                </div>
+                <span
+                  className={
+                    'shrink-0 inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-xs ' +
+                    (b.status === 'running'
+                      ? 'bg-green-500/15 text-green-400'
+                      : b.status === 'error'
+                      ? 'bg-red-500/15 text-red-400'
+                      : 'bg-muted text-muted-foreground')
+                  }
+                >
+                  <span
+                    className={
+                      'w-1.5 h-1.5 rounded-full ' +
+                      (b.status === 'running' ? 'bg-green-400' : b.status === 'error' ? 'bg-red-400' : 'bg-muted-foreground')
+                    }
+                  />
+                  {esc(b.status)}
+                </span>
+              </div>
+
+              <div className="text-xs space-y-1 text-muted-foreground">
+                <div>
+                  <span className="text-foreground/70">Providers:</span>{' '}
+                  {b.providers.length === 0 ? (
+                    <span className="italic">none</span>
+                  ) : (
+                    b.providers.map((p, i) => (
+                      <span key={p.id}>
+                        {i > 0 && ', '}
+                        <span className={p.enabled ? '' : 'line-through opacity-60'}>{esc(p.name)}</span>
+                        {p.type === 'zai' && <span className="opacity-60"> (zai)</span>}
+                      </span>
+                    ))
+                  )}
+                </div>
+                <div>
+                  <span className="text-foreground/70">Channels:</span>{' '}
+                  {b.channel_ids.length === 0 ? (
+                    <span className="italic">all</span>
+                  ) : (
+                    <span>{b.channel_ids.length} channel{b.channel_ids.length === 1 ? '' : 's'}</span>
+                  )}
+                </div>
+                <div>
+                  <span className="text-foreground/70">Updated:</span> {timeAgo(b.updated_at)}
+                </div>
+              </div>
+
+              <div className="mt-auto pt-2 flex flex-wrap gap-1.5">
+                {b.status === 'running' ? (
+                  <button
+                    onClick={() => onAction(b, 'stop')}
+                    className="px-2.5 py-1 rounded-md bg-muted text-sm hover:bg-muted/70"
+                  >
+                    Stop
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => onAction(b, 'start')}
+                    className="px-2.5 py-1 rounded-md bg-green-600 text-white text-sm hover:opacity-90"
+                  >
+                    Start
+                  </button>
+                )}
+                <button
+                  onClick={() => onAction(b, 'restart')}
+                  className="px-2.5 py-1 rounded-md bg-muted text-sm hover:bg-muted/70"
+                >
+                  Restart
+                </button>
+                <button
+                  onClick={() => onEdit(b)}
+                  className="px-2.5 py-1 rounded-md bg-muted text-sm hover:bg-muted/70"
+                >
+                  Edit
+                </button>
+                <button
+                  onClick={() => onDelete(b)}
+                  className="px-2.5 py-1 rounded-md bg-destructive text-white text-sm hover:opacity-90"
+                >
+                  Delete
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Bot editor modal ──────────────────────────────────────────────────────
+function BotEditor({
+  bot: initialBot,
+  isNew,
+  allBots,
+  onClose,
+  flash,
+  onDone,
+}: {
+  bot: Bot;
+  isNew: boolean;
+  allBots: Bot[];
+  onClose: () => void;
+  flash: (msg: string, kind?: 'ok' | 'err') => void;
+  onDone: () => void | Promise<void>;
+}) {
+  const [bot, setBot] = useState<Bot>(initialBot);
+  const [tokenInput, setTokenInput] = useState(''); // for new bots OR token rotation
+  const [pendingKeys, setPendingKeys] = useState<Record<string, string>>({}); // providerId -> new key
+  const [guilds, setGuilds] = useState<GuildInfo[] | null>(null);
+  const [loadingChannels, setLoadingChannels] = useState(false);
+  const [chanErr, setChanErr] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  // Patch helper
+  function patch<K extends keyof Bot>(key: K, val: Bot[K]) {
+    setBot((b) => ({ ...b, [key]: val }));
+  }
+
+  // Load channels — uses bot.id (existing bot) OR posts to /api/discord/guilds with the token input.
+  async function loadChannels() {
+    setChanErr('');
+    setLoadingChannels(true);
+    try {
+      let r: { guilds: GuildInfo[] };
+      if (!isNew && bot.id) {
+        r = (await api(`/api/bots/${bot.id}/channels`)) as { guilds: GuildInfo[] };
+      } else {
+        if (!tokenInput) {
+          setChanErr('Enter a token first to load channels');
+          return;
+        }
+        r = (await api('/api/discord/guilds', {
+          method: 'POST',
+          body: JSON.stringify({ token: tokenInput }),
+        })) as { guilds: GuildInfo[] };
+      }
+      setGuilds(r.guilds || []);
+      // If we got the guilds, auto-fill guild_id if missing
+      if ((!bot.guild_id || bot.guild_id === '') && r.guilds.length > 0) {
+        patch('guild_id', r.guilds[0].id);
+      }
+    } catch (e: any) {
+      setChanErr(e.message || 'Failed to load channels');
+    } finally {
+      setLoadingChannels(false);
+    }
+  }
+
+  // Provider editor helpers
+  function addProvider() {
+    const newP = emptyProvider('p' + (bot.providers.length + 1) + '_' + Date.now().toString(36).slice(-4));
+    setBot((b) => ({ ...b, providers: [...b.providers, newP] }));
+  }
+  function rmProvider(id: string) {
+    setBot((b) => ({ ...b, providers: b.providers.filter((p) => p.id !== id) }));
+  }
+  function patchProvider(id: string, k: keyof Provider, v: any) {
+    setBot((b) => ({
+      ...b,
+      providers: b.providers.map((p) => (p.id === id ? { ...p, [k]: v } : p)),
+    }));
+  }
+
+  // Save handler — lives inside the editor so it has access to local state.
+  async function doSave(withRestart: boolean) {
+    if (!bot.name || !bot.persona) {
+      flash('Name and persona are required', 'err');
+      return;
+    }
+    if (isNew && !tokenInput) {
+      flash('Token is required for new bots', 'err');
+      return;
+    }
+    setSaving(true);
+    const payload: any = {
+      name: bot.name,
+      persona: bot.persona,
+      guild_id: bot.guild_id || '',
+      channel_ids: bot.channel_ids,
+      delegated_bots: bot.delegated_bots,
+      providers: bot.providers.map((p) => ({
+        id: p.id,
+        name: p.name,
+        type: p.type,
+        priority: p.priority,
+        enabled: p.enabled,
+        proxy_url: p.proxy_url,
+        model: p.model,
+        temperature: p.temperature,
+        max_tokens: p.max_tokens,
+        zai_thinking: p.type === 'zai' ? p.zai_thinking : undefined,
+        // Send the new key if one was typed; otherwise omit (undefined) so the
+        // backend keeps the existing encrypted value.
+        api_key: pendingKeys[p.id] || undefined,
+      })),
+      gating: bot.gating,
+      tools: bot.tools,
+    };
+    if (tokenInput) payload.token = tokenInput;
+    try {
+      if (isNew) {
+        const r = (await api('/api/bots', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        })) as { bot: Bot };
+        flash(`Created ${r.bot.name}`, 'ok');
+      } else {
+        await api(`/api/bots/${bot.id}`, {
+          method: 'PUT',
+          body: JSON.stringify(payload),
+        });
+        if (withRestart) {
+          await api(`/api/bots/${bot.id}/restart`, { method: 'POST' });
+          flash(`Saved + restarted ${bot.name}`, 'ok');
+        } else {
+          flash(`Saved ${bot.name}`, 'ok');
+        }
+      }
+      await onDone();
+    } catch (e: any) {
+      flash(`Save failed: ${e.message}`, 'err');
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-50 bg-black/70 overflow-y-auto"
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
+      <div className="max-w-3xl mx-auto my-4 bg-card border border-border rounded-2xl shadow-xl">
+        {/* Sticky header */}
+        <div className="sticky top-0 z-10 flex items-center justify-between px-6 py-3 border-b border-border bg-card rounded-t-2xl">
+          <h2 className="font-semibold text-lg">{isNew ? 'Create bot' : `Edit ${bot.name}`}</h2>
+          <button onClick={onClose} className="p-1.5 rounded hover:bg-muted" aria-label="Close">
+            ✕
+          </button>
+        </div>
+
+        {/* Scrollable body */}
+        <div className="px-6 py-4 space-y-6">
+          {/* Name */}
+          <Section title="Name">
+            <input
+              type="text"
+              value={bot.name}
+              onChange={(e) => patch('name', e.target.value)}
+              placeholder="Bot name"
+              className="w-full px-3 py-2 rounded-md bg-background border border-border focus:outline-none focus:ring-2 focus:ring-ring"
+            />
+          </Section>
+
+          {/* Persona */}
+          <Section title="Persona">
+            <textarea
+              value={bot.persona}
+              onChange={(e) => patch('persona', e.target.value)}
+              rows={8}
+              placeholder="Persona / system prompt…"
+              className="w-full px-3 py-2 rounded-md bg-background border border-border focus:outline-none focus:ring-2 focus:ring-ring font-mono text-sm"
+            />
+          </Section>
+
+          {/* Token */}
+          <Section title={isNew ? 'Discord bot token' : 'Rotate token (leave blank to keep)'}>
+            <div className="flex gap-2">
+              <input
+                type="password"
+                value={tokenInput}
+                onChange={(e) => setTokenInput(e.target.value)}
+                placeholder={isNew ? 'Bot token from Discord Developer Portal' : '•••• (unchanged)'}
+                className="flex-1 px-3 py-2 rounded-md bg-background border border-border focus:outline-none focus:ring-2 focus:ring-ring font-mono text-sm"
+              />
+              <button
+                onClick={loadChannels}
+                disabled={loadingChannels}
+                className="px-3 py-2 rounded-md border border-border text-sm hover:bg-muted disabled:opacity-50"
+              >
+                {loadingChannels ? 'Loading…' : 'Load channels'}
+              </button>
+            </div>
+            {chanErr && <div className="text-xs text-destructive mt-1">{esc(chanErr)}</div>}
+          </Section>
+
+          {/* Guild ID */}
+          <Section title="Guild ID">
+            <input
+              type="text"
+              value={bot.guild_id || ''}
+              onChange={(e) => patch('guild_id', e.target.value)}
+              placeholder="Guild ID (blank = all guilds the bot is in)"
+              className="w-full px-3 py-2 rounded-md bg-background border border-border focus:outline-none focus:ring-2 focus:ring-ring font-mono text-sm"
+            />
+          </Section>
+
+          {/* Channels */}
+          <Section title={`Channels (${bot.channel_ids.length} selected)`}>
+            {guilds === null ? (
+              <div className="text-sm text-muted-foreground">
+                Click "Load channels" above to fetch the bot's guilds + channels.
+              </div>
+            ) : guilds.length === 0 ? (
+              <div className="text-sm text-muted-foreground">Bot is not in any guilds.</div>
+            ) : (
+              <div className="space-y-3 max-h-72 overflow-y-auto custom-scroll pr-1">
+                {guilds.map((g) => (
+                  <div key={g.id} className="border border-border rounded-md p-2">
+                    <div className="font-medium text-sm mb-1.5 flex items-center gap-2">
+                      {g.icon && <img src={g.icon} alt="" className="w-4 h-4 rounded" />}
+                      {esc(g.name)}
+                      <span className="text-xs text-muted-foreground font-mono">{esc(g.id)}</span>
+                    </div>
+                    <div className="space-y-1 pl-2">
+                      {g.text_channels.length === 0 ? (
+                        <div className="text-xs text-muted-foreground italic">No text channels found</div>
+                      ) : (
+                        g.text_channels.map((c) => {
+                          const checked = bot.channel_ids.includes(c.id);
+                          return (
+                            <label key={c.id} className="flex items-center gap-2 text-sm cursor-pointer hover:bg-muted/50 px-1.5 py-0.5 rounded">
+                              <input
+                                type="checkbox"
+                                checked={checked}
+                                onChange={(e) => {
+                                  const next = e.target.checked
+                                    ? [...bot.channel_ids, c.id]
+                                    : bot.channel_ids.filter((x) => x !== c.id);
+                                  patch('channel_ids', next);
+                                }}
+                              />
+                              <span className="font-mono text-xs opacity-70">#</span>
+                              <span>{esc(c.name)}</span>
+                              <span className="text-xs text-muted-foreground font-mono ml-auto">{esc(c.id)}</span>
+                            </label>
+                          );
+                        })
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+            <div className="text-xs text-muted-foreground mt-1">
+              If 0 channels are selected, the bot responds in ALL text channels of the configured guild.
+            </div>
+          </Section>
+
+          {/* Providers */}
+          <Section
+            title="Providers (raced in parallel — first success wins)"
+            right={
+              <button onClick={addProvider} className="px-2 py-1 rounded-md border border-border text-xs hover:bg-muted">
+                + Add
+              </button>
+            }
+          >
+            <div className="space-y-3">
+              {bot.providers.length === 0 && (
+                <div className="text-sm text-muted-foreground italic">No providers. Click "+ Add" to create one.</div>
+              )}
+              {bot.providers.map((p, idx) => (
+                <div key={p.id} className="border border-border rounded-md p-3 bg-background/50">
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="font-medium text-sm">Provider #{idx + 1}</div>
+                    <button
+                      onClick={() => rmProvider(p.id)}
+                      className="text-xs text-destructive hover:underline"
+                    >
+                      remove
+                    </button>
+                  </div>
+                  <div className="grid sm:grid-cols-2 gap-2 text-sm">
+                    <LabeledInput label="Name" value={p.name} onChange={(v) => patchProvider(p.id, 'name', v)} />
+                    <div>
+                      <label className="text-xs text-muted-foreground">Type</label>
+                      <select
+                        value={p.type}
+                        onChange={(e) => patchProvider(p.id, 'type', e.target.value as 'openai' | 'zai')}
+                        className="w-full px-2 py-1.5 rounded-md bg-background border border-border focus:outline-none focus:ring-2 focus:ring-ring"
+                      >
+                        <option value="openai">openai (OpenAI-compatible proxy)</option>
+                        <option value="zai">zai (z.ai SDK direct)</option>
+                      </select>
+                    </div>
+                    {p.type === 'openai' && (
+                      <LabeledInput
+                        label="Proxy URL"
+                        value={p.proxy_url || ''}
+                        onChange={(v) => patchProvider(p.id, 'proxy_url', v)}
+                        mono
+                      />
+                    )}
+                    <LabeledInput
+                      label="Model"
+                      value={p.model || ''}
+                      onChange={(v) => patchProvider(p.id, 'model', v)}
+                      mono
+                    />
+                    {p.type === 'openai' && (
+                      <div>
+                        <label className="text-xs text-muted-foreground">
+                          API key {p.api_key_masked === 'set' ? '(set — leave blank to keep)' : '(not set)'}
+                        </label>
+                        <input
+                          type="password"
+                          value={pendingKeys[p.id] || ''}
+                          onChange={(e) =>
+                            setPendingKeys((m) => ({ ...m, [p.id]: e.target.value }))
+                          }
+                          placeholder={p.api_key_masked === 'set' ? '•••• set (blank = keep)' : 'Paste key'}
+                          className="w-full px-2 py-1.5 rounded-md bg-background border border-border focus:outline-none focus:ring-2 focus:ring-ring font-mono text-xs"
+                        />
+                      </div>
+                    )}
+                    {p.type === 'openai' && (
+                      <LabeledInput
+                        label="Temperature"
+                        type="number"
+                        value={String(p.temperature ?? 0.85)}
+                        onChange={(v) => patchProvider(p.id, 'temperature', parseFloat(v) || 0)}
+                      />
+                    )}
+                    {p.type === 'openai' && (
+                      <LabeledInput
+                        label="Max tokens"
+                        type="number"
+                        value={String(p.max_tokens ?? 1500)}
+                        onChange={(v) => patchProvider(p.id, 'max_tokens', parseInt(v, 10) || 0)}
+                      />
+                    )}
+                    <LabeledInput
+                      label="Priority (lower = tried first)"
+                      type="number"
+                      value={String(p.priority ?? 1)}
+                      onChange={(v) => patchProvider(p.id, 'priority', parseInt(v, 10) || 1)}
+                    />
+                    {p.type === 'zai' && (
+                      <div>
+                        <label className="text-xs text-muted-foreground">z.ai thinking</label>
+                        <select
+                          value={p.zai_thinking || 'disabled'}
+                          onChange={(e) => patchProvider(p.id, 'zai_thinking', e.target.value)}
+                          className="w-full px-2 py-1.5 rounded-md bg-background border border-border focus:outline-none focus:ring-2 focus:ring-ring"
+                        >
+                          <option value="disabled">disabled</option>
+                          <option value="enabled">enabled</option>
+                        </select>
+                      </div>
+                    )}
+                    <div className="flex items-end gap-2">
+                      <label className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={!!p.enabled}
+                          onChange={(e) => patchProvider(p.id, 'enabled', e.target.checked)}
+                        />
+                        Enabled
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </Section>
+
+          {/* Behavior */}
+          <Section title="Behavior / gating">
+            <div className="space-y-3 text-sm">
+              <div>
+                <label className="flex items-center justify-between">
+                  <span>Response probability: <b>{(bot.gating.response_probability * 100).toFixed(0)}%</b></span>
+                </label>
+                <input
+                  type="range"
+                  min={0}
+                  max={1}
+                  step={0.05}
+                  value={bot.gating.response_probability}
+                  onChange={(e) =>
+                    setBot((b) => ({
+                      ...b,
+                      gating: { ...b.gating, response_probability: parseFloat(e.target.value) },
+                    }))
+                  }
+                  className="w-full"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground">Skip patterns (one regex per line)</label>
+                <textarea
+                  value={bot.gating.skip_patterns.join('\n')}
+                  onChange={(e) =>
+                    setBot((b) => ({
+                      ...b,
+                      gating: { ...b.gating, skip_patterns: e.target.value.split('\n').filter((s) => s !== '') },
+                    }))
+                  }
+                  rows={3}
+                  className="w-full px-2 py-1.5 rounded-md bg-background border border-border focus:outline-none focus:ring-2 focus:ring-ring font-mono text-xs"
+                />
+              </div>
+              <div className="grid sm:grid-cols-3 gap-3">
+                <LabeledInput
+                  label="Cooldown (ms)"
+                  type="number"
+                  value={String(bot.gating.cooldown_ms)}
+                  onChange={(v) =>
+                    setBot((b) => ({ ...b, gating: { ...b.gating, cooldown_ms: parseInt(v, 10) || 0 } }))
+                  }
+                />
+                <LabeledInput
+                  label="Max context msgs"
+                  type="number"
+                  value={String(bot.gating.max_context_messages)}
+                  onChange={(v) =>
+                    setBot((b) => ({ ...b, gating: { ...b.gating, max_context_messages: parseInt(v, 10) || 0 } }))
+                  }
+                />
+                <LabeledInput
+                  label="Response delay (ms)"
+                  type="number"
+                  value={String(bot.gating.response_delay_ms)}
+                  onChange={(v) =>
+                    setBot((b) => ({ ...b, gating: { ...b.gating, response_delay_ms: parseInt(v, 10) || 0 } }))
+                  }
+                />
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={!!bot.gating.ignore_bots}
+                  onChange={(e) =>
+                    setBot((b) => ({ ...b, gating: { ...b.gating, ignore_bots: e.target.checked } }))
+                  }
+                />
+                Ignore bot messages (won't respond to other bots — bot-to-bot summon flow always bypasses this)
+              </label>
+            </div>
+          </Section>
+
+          {/* Tools */}
+          <Section title="Tools">
+            <div className="grid grid-cols-2 gap-2 text-sm">
+              {([
+                ['web_search', 'Web search'],
+                ['ping_proxy', 'Ping AI proxy'],
+                ['fetch_url', 'Fetch URL'],
+                ['github_lookup', 'GitHub lookup'],
+                ['memory', 'Memory (read/write)'],
+                ['schedule_reminder', 'Schedule reminder'],
+                ['react_to_message', 'React to message (multi-emoji)'],
+                ['summon_bot', 'Summon bot'],
+              ] as const).map(([k, label]) => (
+                <label key={k} className="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={!!bot.tools[k]}
+                    onChange={(e) =>
+                      setBot((b) => ({ ...b, tools: { ...b.tools, [k]: e.target.checked } }))
+                    }
+                  />
+                  {label}
+                </label>
+              ))}
+            </div>
+          </Section>
+
+          {/* Delegated bots */}
+          <Section title="Delegated bots (allowed targets for summon_bot tool)">
+            <div className="space-y-1">
+              {allBots.filter((b) => b.id !== bot.id).length === 0 ? (
+                <div className="text-sm text-muted-foreground italic">No other bots exist yet.</div>
+              ) : (
+                allBots
+                  .filter((b) => b.id !== bot.id)
+                  .map((b) => {
+                    const checked = bot.delegated_bots.includes(b.id);
+                    return (
+                      <label key={b.id} className="flex items-center gap-2 text-sm cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={checked}
+                          onChange={(e) => {
+                            const next = e.target.checked
+                              ? [...bot.delegated_bots, b.id]
+                              : bot.delegated_bots.filter((x) => x !== b.id);
+                            patch('delegated_bots', next);
+                          }}
+                        />
+                        {esc(b.name)} <span className="text-xs text-muted-foreground font-mono">{esc(b.id)}</span>
+                      </label>
+                    );
+                  })
+              )}
+            </div>
+          </Section>
+        </div>
+
+        {/* Sticky footer */}
+        <div className="sticky bottom-0 z-10 flex items-center justify-end gap-2 px-6 py-3 border-t border-border bg-card rounded-b-2xl">
+          <button
+            onClick={onClose}
+            disabled={saving}
+            className="px-4 py-2 rounded-md border border-border text-sm hover:bg-muted disabled:opacity-50"
+          >
+            Cancel
+          </button>
+          {!isNew && (
+            <button
+              onClick={() => doSave(true)}
+              disabled={saving}
+              className="px-4 py-2 rounded-md bg-muted text-sm font-medium hover:bg-muted/70 disabled:opacity-50"
+            >
+              {saving ? 'Saving…' : 'Save & Restart'}
+            </button>
+          )}
+          <button
+            onClick={() => doSave(false)}
+            disabled={saving}
+            className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
+          >
+            {saving ? 'Saving…' : 'Save'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ─── Small subcomponents ────────────────────────────────────────────────────
+function Section({ title, children, right }: { title: string; children: React.ReactNode; right?: React.ReactNode }) {
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="font-medium text-sm">{title}</h3>
+        {right}
+      </div>
+      {children}
+    </section>
+  );
+}
+
+function LabeledInput({
+  label,
+  value,
+  onChange,
+  type = 'text',
+  placeholder,
+  mono,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  type?: string;
+  placeholder?: string;
+  mono?: boolean;
+}) {
+  return (
+    <div>
+      <label className="text-xs text-muted-foreground">{label}</label>
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className={
+          'w-full px-2 py-1.5 rounded-md bg-background border border-border focus:outline-none focus:ring-2 focus:ring-ring ' +
+          (mono ? 'font-mono text-xs' : 'text-sm')
+        }
+      />
+    </div>
+  );
+}
+
+// ─── Proxies tab ────────────────────────────────────────────────────────────
+function ProxiesTab() {
+  const [proxyUrl, setProxyUrl] = useState('https://lolmaobruhhh-fap.hf.space/v1');
+  const [apiKey, setApiKey] = useState('FAP!');
+  const [model, setModel] = useState('');
+  const [result, setResult] = useState<any>(null);
+  const [pinging, setPinging] = useState(false);
+
+  async function ping() {
+    setPinging(true);
+    setResult(null);
+    try {
+      const r = await api('/api/llm/ping', {
+        method: 'POST',
+        body: JSON.stringify({
+          proxy_url: proxyUrl,
+          api_key: apiKey,
+          model: model || undefined,
+        }),
+      });
+      setResult(r);
+    } catch (e: any) {
+      setResult({ status: 'error', error: e.message });
+    } finally {
+      setPinging(false);
+    }
+  }
+
+  return (
+    <div>
+      <h2 className="text-xl font-semibold mb-4">Proxies</h2>
+      <div className="max-w-md space-y-3">
+        <div>
+          <label className="text-xs text-muted-foreground">Proxy URL</label>
+          <input
+            type="text"
+            value={proxyUrl}
+            onChange={(e) => setProxyUrl(e.target.value)}
+            className="w-full px-3 py-2 rounded-md bg-card border border-border focus:outline-none focus:ring-2 focus:ring-ring font-mono text-sm"
+          />
+        </div>
+        <div>
+          <label className="text-xs text-muted-foreground">API key</label>
+          <input
+            type="password"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+            className="w-full px-3 py-2 rounded-md bg-card border border-border focus:outline-none focus:ring-2 focus:ring-ring font-mono text-sm"
+          />
+        </div>
+        <div>
+          <label className="text-xs text-muted-foreground">Model (optional — sends test message if set)</label>
+          <input
+            type="text"
+            value={model}
+            onChange={(e) => setModel(e.target.value)}
+            placeholder="e.g. gpt-4o-mini"
+            className="w-full px-3 py-2 rounded-md bg-card border border-border focus:outline-none focus:ring-2 focus:ring-ring font-mono text-sm"
+          />
+        </div>
+        <button
+          onClick={ping}
+          disabled={pinging}
+          className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
+        >
+          {pinging ? 'Pinging…' : 'Ping'}
+        </button>
+      </div>
+
+      {result && (
+        <div className="mt-6 max-w-2xl">
+          <h3 className="font-medium mb-2">Result</h3>
+          <pre className="text-xs bg-card border border-border rounded-md p-3 overflow-x-auto custom-scroll">
+            {JSON.stringify(result, null, 2)}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Logs tab ──────────────────────────────────────────────────────────────
+function LogsTab({ bots }: { bots: Bot[] }) {
+  const [selected, setSelected] = useState('');
+  const [autoRefresh, setAutoRefresh] = useState(false);
+  const [logs, setLogs] = useState<string[]>([]);
+  const [error, setError] = useState('');
+  const timer = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const fetchLogs = useCallback(async () => {
+    if (!selected) return;
+    try {
+      const r = (await api(`/api/bots/${selected}/logs?lines=500`)) as { logs: string[] };
+      setLogs(r.logs || []);
+      setError('');
+    } catch (e: any) {
+      setError(e.message);
+      setLogs([]);
+    }
+  }, [selected]);
+
+  useEffect(() => {
+    if (selected) {
+      // fetchLogs is async; we don't await here — fire and forget.
+      // It calls setLogs/setError internally, which the linter flags as
+      // "set-state-in-effect", but we genuinely want to refresh logs when
+      // the selected bot changes.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      fetchLogs();
+    }
+  }, [selected, fetchLogs]);
+
+  useEffect(() => {
+    if (timer.current) clearInterval(timer.current);
+    if (autoRefresh && selected) {
+      timer.current = setInterval(fetchLogs, 3000);
+    }
+    return () => {
+      if (timer.current) clearInterval(timer.current);
+    };
+  }, [autoRefresh, selected, fetchLogs]);
+
+  return (
+    <div>
+      <h2 className="text-xl font-semibold mb-4">Logs</h2>
+      <div className="flex items-center gap-3 mb-4">
+        <select
+          value={selected}
+          onChange={(e) => setSelected(e.target.value)}
+          className="px-3 py-1.5 rounded-md bg-card border border-border focus:outline-none focus:ring-2 focus:ring-ring text-sm"
+        >
+          <option value="">— Select bot —</option>
+          {bots.map((b) => (
+            <option key={b.id} value={b.id}>
+              {b.name} ({b.id})
+            </option>
+          ))}
+        </select>
+        <label className="flex items-center gap-2 text-sm cursor-pointer">
+          <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
+          Auto-refresh (3s)
+        </label>
+        <button
+          onClick={fetchLogs}
+          className="px-3 py-1.5 rounded-md border border-border text-sm hover:bg-muted"
+        >
+          Refresh
+        </button>
+      </div>
+
+      {error && <div className="text-sm text-destructive mb-2">{esc(error)}</div>}
+
+      {!selected ? (
+        <div className="text-sm text-muted-foreground">Select a bot above.</div>
+      ) : (
+        <div className="bg-card border border-border rounded-md p-3 max-h-[60vh] overflow-y-auto custom-scroll">
+          {logs.length === 0 ? (
+            <div className="text-sm text-muted-foreground italic">No logs yet.</div>
+          ) : (
+            logs.map((line, i) => {
+              let parsed: any = null;
+              try {
+                parsed = JSON.parse(line);
+              } catch {
+                /* not JSON */
+              }
+              if (parsed) {
+                const color =
+                  parsed.level === 'error'
+                    ? 'text-red-400'
+                    : parsed.level === 'warn'
+                    ? 'text-yellow-400'
+                    : parsed.level === 'info'
+                    ? 'text-foreground'
+                    : 'text-muted-foreground';
+                return (
+                  <div key={i} className="text-xs font-mono leading-relaxed">
+                    <span className="text-muted-foreground">{esc(parsed.ts)}</span>{' '}
+                    <span className={color}>[{esc(parsed.level)}]</span>{' '}
+                    <span className="text-foreground">{esc(parsed.msg)}</span>
+                    {parsed.error && <span className="text-red-400"> — {esc(parsed.error)}</span>}
+                    {parsed.provider && <span className="text-muted-foreground"> (via {esc(parsed.provider)})</span>}
+                  </div>
+                );
+              }
+              return (
+                <div key={i} className="text-xs font-mono text-muted-foreground leading-relaxed">
+                  {esc(line)}
+                </div>
+              );
+            })
+          )}
+        </div>
       )}
     </div>
   );

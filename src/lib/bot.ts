@@ -14,9 +14,13 @@ import { writeLog } from './logger';
 const runningBots = new Map<string, { client: Client; llm: LLMClient; config: BotConfig }>();
 const pendingSummons = new Map<string, { resolve: (s: string) => void; timeout: NodeJS.Timeout }>();
 
-// Per-channel history (in-memory, resets on restart)
-const channelHistory = new Map<string, LLMMessage[]>();
-const lastReplyAt = new Map<string, number>();
+// Per-bot-per-channel history (in-memory, resets on restart).
+// Keyed by `${botId}:${channelId}` so bots don't bleed history into each other.
+const botChannelHistory = new Map<string, LLMMessage[]>();
+// Per-bot-per-channel cooldown timestamp.
+const botLastReplyAt = new Map<string, number>();
+
+function histKey(botId: string, channelId: string) { return `${botId}:${channelId}`; }
 
 export async function startBot(botId: string): Promise<void> {
   if (runningBots.has(botId)) {
@@ -43,7 +47,7 @@ export async function startBot(botId: string): Promise<void> {
     partials: [Partials.Channel, Partials.Message],
   });
 
-  // LLM client (multi-provider with failover)
+  // LLM client (multi-provider with racing)
   const llm = new LLMClient(config.providers, config.llm);
 
   // Cache discord_user_id after login
@@ -134,14 +138,19 @@ export async function startBot(botId: string): Promise<void> {
       if (config.channel_ids.length > 0 && !config.channel_ids.includes(message.channelId)) return;
       // Skip own messages
       if (message.author.id === client.user?.id) return;
-      // Skip messages from delegated bots (they're handled by summon flow)
-      if (message.author.bot && config.delegated_bots.length > 0) {
+
+      // isBotMessage: tracks if the incoming message was authored by ANY bot
+      // (used for cooldown bypass logic below — bot-to-bot replies have no cooldown).
+      const isBotMessage = !!message.author.bot;
+
+      // If message is from a delegated bot, route to summon flow (no cooldown, no skip-pattern)
+      if (isBotMessage && config.delegated_bots.length > 0) {
         for (const targetId of config.delegated_bots) {
           const target = await db.bot.findUnique({ where: { id: targetId } });
           if (target?.discordUserId === message.author.id) {
             const summonKey = `${targetId}:${message.channelId}`;
             const pending = pendingSummons.get(summonKey);
-            if (pending && !('resolved' in pending)) {
+            if (pending) {
               clearTimeout(pending.timeout);
               pendingSummons.delete(summonKey);
               pending.resolve(JSON.stringify({
@@ -150,6 +159,13 @@ export async function startBot(botId: string): Promise<void> {
                 response: message.content,
               }));
             }
+            // Even if no pending summon, push the bot's reply to history so the
+            // bot sees its delegate's response when it next replies.
+            const hk = histKey(botId, message.channelId);
+            const hist = botChannelHistory.get(hk) || [];
+            hist.push({ role: 'user', content: `${message.author.username}: ${message.content}` });
+            while (hist.length > config.gating.max_context_messages) hist.shift();
+            botChannelHistory.set(hk, hist);
             return;
           }
         }
@@ -158,39 +174,46 @@ export async function startBot(botId: string): Promise<void> {
       const content = message.content || '';
       if (!content && !message.embeds?.length && !message.attachments?.size) return;
 
-      // Push to history
-      const hist = channelHistory.get(message.channelId) || [];
+      // Push to per-bot-channel history
+      const hk = histKey(botId, message.channelId);
+      const hist = botChannelHistory.get(hk) || [];
       hist.push({ role: 'user', content: `${message.author.username}: ${content}` });
       while (hist.length > config.gating.max_context_messages) hist.shift();
-      channelHistory.set(message.channelId, hist);
+      botChannelHistory.set(hk, hist);
 
-      // shouldRespond?
-      if (config.gating.ignore_bots && message.author.bot) return;
+      // shouldRespond? (bot-to-bot bypasses ignore_bots + cooldown)
+      if (isBotMessage && config.gating.ignore_bots) return;
       for (const pat of config.gating.skip_patterns) {
         try {
           if (new RegExp(pat, 'i').test(content.trim())) return;
         } catch { /* ignore */ }
       }
-      const last = lastReplyAt.get(message.channelId) || 0;
-      if (Date.now() - last < config.gating.cooldown_ms) return;
+      // Per-bot-per-channel cooldown — but bypass for bot-to-bot messages.
+      if (!isBotMessage) {
+        const last = botLastReplyAt.get(hk) || 0;
+        if (Date.now() - last < config.gating.cooldown_ms) return;
+      }
       if (Math.random() > config.gating.response_probability) return;
 
       log('info', 'Responding to message', {
         author: message.author.username,
         channel: message.channelId,
+        is_bot: isBotMessage,
         content_preview: content.slice(0, 80),
       });
 
       // Build LLM messages
       const llmMessages: LLMMessage[] = [
         { role: 'system', content: config.persona },
-        ...(channelHistory.get(message.channelId) || []),
+        ...(botChannelHistory.get(hk) || []),
       ];
 
       // Tool calling loop
       const enabledTools = getEnabledTools(config);
       const MAX_TOOL_ROUNDS = 5;
       let rounds = 0;
+      const MAX_EMPTY_RETRIES = 2;
+      let emptyRetries = 0;
 
       while (rounds < MAX_TOOL_ROUNDS) {
         const resp = await llm.chat(llmMessages, enabledTools);
@@ -209,6 +232,7 @@ export async function startBot(botId: string): Promise<void> {
             let parsedArgs: Record<string, unknown> = {};
             try { parsedArgs = JSON.parse(tc.function.arguments || '{}'); } catch {}
             parsedArgs._channel_id = message.channelId;
+            parsedArgs._message_id = message.id;
             const result = await dispatchTool(tc.function.name, parsedArgs, ctx);
             log('info', 'Tool result', { name: tc.function.name, result_preview: result.slice(0, 200) });
             llmMessages.push({ role: 'tool', content: result, tool_call_id: tc.id, name: tc.function.name });
@@ -218,8 +242,24 @@ export async function startBot(botId: string): Promise<void> {
 
         const reply = (resp.content || '').trim();
         if (!reply) {
-          log('warn', 'LLM returned empty content, skipping reply');
-          return;
+          // Retry on empty LLM response — sometimes the LLM just blanks out.
+          emptyRetries++;
+          if (emptyRetries > MAX_EMPTY_RETRIES) {
+            log('warn', `LLM returned empty content ${MAX_EMPTY_RETRIES}x, skipping reply`);
+            return;
+          }
+          log('warn', `LLM returned empty content, retrying (${emptyRetries}/${MAX_EMPTY_RETRIES})`);
+          // Add a nudge to history
+          llmMessages.push({ role: 'user', content: '(system: previous response was empty, please respond now)' });
+          continue;
+        }
+
+        // response_delay_ms — wait before sending reply (mimics human "typing" latency)
+        if (config.gating.response_delay_ms > 0) {
+          try {
+            await message.channel.sendTyping?.();
+          } catch { /* not all channels support sendTyping */ }
+          await new Promise(r => setTimeout(r, Math.min(config.gating.response_delay_ms, 30000)));
         }
 
         // Send to Discord (chunk if >2000 chars)
@@ -232,11 +272,12 @@ export async function startBot(botId: string): Promise<void> {
         }
 
         hist.push({ role: 'assistant', content: reply });
-        lastReplyAt.set(message.channelId, Date.now());
+        // Update per-bot-per-channel cooldown
+        botLastReplyAt.set(hk, Date.now());
 
-        // Random emoji reaction
+        // Random emoji reaction (10% chance) when react_to_message tool is enabled
         if (config.tools.react_to_message && Math.random() < 0.1) {
-          const emojis = ['🌸', '✨', '💫', '💜', '🌙', '🍯'];
+          const emojis = ['🌸', '✨', '💫', '💜', '🌙', '🍯', '👀', '🤔'];
           try { await message.react(emojis[Math.floor(Math.random() * emojis.length)]); } catch { /* ignore */ }
         }
 
@@ -287,9 +328,12 @@ export async function stopBot(botId: string): Promise<void> {
     await db.bot.update({ where: { id: botId }, data: { status: 'stopped' } }).catch(() => {});
     return;
   }
-  bot.client.destroy();
+  try { bot.client.destroy(); } catch { /* ignore */ }
   runningBots.delete(botId);
   await db.bot.update({ where: { id: botId }, data: { status: 'stopped' } }).catch(() => {});
+  // Clean up per-bot in-memory state
+  for (const key of botChannelHistory.keys()) if (key.startsWith(`${botId}:`)) botChannelHistory.delete(key);
+  for (const key of botLastReplyAt.keys()) if (key.startsWith(`${botId}:`)) botLastReplyAt.delete(key);
   writeLog(botId, 'info', 'Bot stopped');
 }
 
@@ -306,8 +350,39 @@ export function listRunningBots(): string[] {
   return Array.from(runningBots.keys());
 }
 
+// Orphan check — stop any in-process bots whose DB records are gone
+export async function reapOrphanedBots(): Promise<void> {
+  const runningIds = Array.from(runningBots.keys());
+  if (runningIds.length === 0) return;
+  const existing = await db.bot.findMany({ where: { id: { in: runningIds } }, select: { id: true } });
+  const existingIds = new Set(existing.map(b => b.id));
+  for (const id of runningIds) {
+    if (!existingIds.has(id)) {
+      writeLog(id, 'warn', 'Orphan detected — DB record gone, stopping in-process bot');
+      await stopBot(id).catch(() => {});
+    }
+  }
+}
+
+// Auto-seed: if no bots exist at all, create a sensible default.
+export async function autoSeedBots(): Promise<void> {
+  const count = await db.bot.count();
+  if (count > 0) return;
+  const { encryptString } = await import('./crypto');
+  const { nanoid } = await import('nanoid');
+  // No bots — don't create one with a fake token; just log so the user knows.
+  // (Creating a bot without a real token would just produce an un-startable row.)
+  writeLog('system', 'info', 'No bots found in DB — create one via the panel.');
+  void encryptString; void nanoid; // keep imports live for future use
+}
+
 // Auto-restart bots on Next.js process restart (in case of crash/deploy)
 export async function autostartBots(): Promise<void> {
+  // 1) Orphan check first — clean up any in-process bots whose records are gone
+  await reapOrphanedBots();
+  // 2) Auto-seed if totally empty (currently a no-op, but a hook for future seeds)
+  await autoSeedBots();
+  // 3) Restart any bots whose status was 'running' when the process exited
   const bots = await db.bot.findMany({ where: { status: 'running' } });
   for (const bot of bots) {
     try { await startBot(bot.id); }
