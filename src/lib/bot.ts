@@ -23,8 +23,14 @@ const botLastReplyAt = new Map<string, number>();
 function histKey(botId: string, channelId: string) { return `${botId}:${channelId}`; }
 
 export async function startBot(botId: string): Promise<void> {
+  // If already running, destroy the old client first (handles HMR orphans + double-start)
   if (runningBots.has(botId)) {
-    throw new Error(`bot ${botId} is already running`);
+    try {
+      const old = runningBots.get(botId)!;
+      old.client.removeAllListeners();
+      old.client.destroy();
+    } catch {}
+    runningBots.delete(botId);
   }
   const bot = await db.bot.findUnique({ where: { id: botId } });
   if (!bot) throw new Error(`bot ${botId} not found`);
