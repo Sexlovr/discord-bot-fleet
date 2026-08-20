@@ -297,6 +297,23 @@ export default function Home() {
                 flash(`${action} failed: ${e.message}`, 'err');
               }
             }}
+            onClearContext={async (b) => {
+              try {
+                await api(`/api/bots/${b.id}/clear-context`, { method: 'POST' });
+                flash(`Context cleared for ${b.name}`, 'ok');
+              } catch (e: any) {
+                flash(`Clear failed: ${e.message}`, 'err');
+              }
+            }}
+            onClearAll={async () => {
+              if (!confirm('Clear ALL bot contexts? This wipes all conversation history for every bot.')) return;
+              try {
+                await api('/api/bots/clear-all-context', { method: 'POST' });
+                flash('All contexts cleared', 'ok');
+              } catch (e: any) {
+                flash(`Clear all failed: ${e.message}`, 'err');
+              }
+            }}
             onDelete={async (b) => {
               if (!confirm(`Delete bot "${b.name}"?`)) return;
               try {
@@ -349,6 +366,8 @@ function BotsTab({
   onEdit,
   onCreate,
   onAction,
+  onClearContext,
+  onClearAll,
   onDelete,
 }: {
   bots: Bot[];
@@ -357,11 +376,17 @@ function BotsTab({
   onEdit: (b: Bot) => void;
   onCreate: () => void;
   onAction: (b: Bot, action: 'start' | 'stop' | 'restart') => void;
+  onClearContext: (b: Bot) => void;
+  onClearAll: () => void;
   onDelete: (b: Bot) => void;
 }) {
   return (
     <div>
-      <div className="flex items-center justify-between mb-4">
+      <div className="flex items-center justify-between mb-4 gap-2 flex-wrap">
+        <div className="flex items-center gap-2">
+          <h2 className="text-lg font-semibold">Your bots</h2>
+          <button onClick={onClearAll} className="text-xs bg-yellow-500/20 text-yellow-500 border border-yellow-500/30 px-2 py-1 rounded hover:bg-yellow-500/30">Clear All Context</button>
+        </div>
         <h2 className="text-xl font-semibold">Bots</h2>
         <div className="flex gap-2">
           <button
@@ -467,6 +492,13 @@ function BotsTab({
                   className="px-2.5 py-1 rounded-md bg-muted text-sm hover:bg-muted/70"
                 >
                   Edit
+                </button>
+                <button
+                  onClick={() => onClearContext(b)}
+                  className="px-2.5 py-1 rounded-md bg-yellow-500/20 text-yellow-500 text-sm hover:bg-yellow-500/30"
+                  title="Clear conversation history for this bot"
+                >
+                  Clear
                 </button>
                 <button
                   onClick={() => onDelete(b)}

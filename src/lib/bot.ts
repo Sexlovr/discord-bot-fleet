@@ -322,6 +322,24 @@ export async function startBot(botId: string): Promise<void> {
   runningBots.set(botId, { client, llm, config });
 }
 
+// Clear in-memory chat history + cooldown for a single bot
+export function clearBotContext(botId: string): void {
+  for (const key of botChannelHistory.keys()) {
+    if (key.startsWith(`${botId}:`)) botChannelHistory.delete(key);
+  }
+  for (const key of botLastReplyAt.keys()) {
+    if (key.startsWith(`${botId}:`)) botLastReplyAt.delete(key);
+  }
+  writeLog(botId, 'info', 'Context cleared');
+}
+
+// Clear in-memory chat history for ALL bots
+export function clearAllContext(): void {
+  botChannelHistory.clear();
+  botLastReplyAt.clear();
+  writeLog('system', 'info', 'All bot contexts cleared');
+}
+
 export async function stopBot(botId: string): Promise<void> {
   const bot = runningBots.get(botId);
   if (!bot) {
