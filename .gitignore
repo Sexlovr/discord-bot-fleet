@@ -52,3 +52,11 @@ prompt
 server.log
 # Skills directory
 /skills/
+# ─── Runtime state — never commit DB or local secrets ────────────────────
+# These are runtime state, NOT source code. Both localhost and the z.ai
+# deployment should have their own independent DBs.
+/db/
+/dev.log
+/server.log
+/tool-results/
+/db-backup/
