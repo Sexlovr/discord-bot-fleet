@@ -7,7 +7,7 @@ import { db } from '@/lib/db';
 import { requireAuth } from '@/lib/auth';
 import { encryptString, decryptString, maskToken } from '@/lib/crypto';
 import { sanitizeBot } from '@/lib/types';
-import { stopBot } from '@/lib/bot';
+import { stopBot, startBot, isBotRunning } from '@/lib/bot';
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   if (!(await requireAuth())) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
@@ -120,8 +120,33 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
   delete patch.discord_user_id;
   delete patch.providers_public; // legacy guard
 
+  // Detect whether ANY "live-affecting" field is changing. If so AND the bot
+  // is currently running, we MUST restart it — otherwise the running bot's
+  // in-memory config (captured at startBot time) becomes stale. This was the
+  // root cause of the "I selected general for Yuki and it never worked" bug:
+  // the user clicked Save (not Save & Restart), the DB got updated, but the
+  // running bot kept using the OLD channel_ids filter.
+  const wasRunning = isBotRunning(id);
   const updated = await db.bot.update({ where: { id }, data: patch as any });
-  return NextResponse.json(sanitizeBot(updated));
+
+  let restarted = false;
+  let restartError: string | undefined;
+  if (wasRunning) {
+    try {
+      // stopBot destroys the old client (releasing its captured config),
+      // startBot re-reads the just-updated DB row and captures fresh config.
+      await stopBot(id);
+      await startBot(id);
+      restarted = true;
+    } catch (e: any) {
+      restartError = e?.message || 'restart failed';
+    }
+  }
+
+  return NextResponse.json({
+    ...sanitizeBot(updated),
+    ...(wasRunning ? { _restart: restarted ? 'ok' : 'failed', _restart_error: restartError } : {}),
+  });
 }
 
 export async function DELETE(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {

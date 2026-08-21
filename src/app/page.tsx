@@ -646,15 +646,29 @@ function BotEditor({
         })) as { bot: Bot };
         flash(`Created ${r.bot.name}`, 'ok');
       } else {
-        await api(`/api/bots/${bot.id}`, {
+        // Backend auto-restarts the bot if it's currently running (so the
+        // in-memory config — captured at startBot time — gets refreshed).
+        // The response includes _restart: 'ok' | 'failed' | undefined.
+        const r = (await api(`/api/bots/${bot.id}`, {
           method: 'PUT',
           body: JSON.stringify(payload),
-        });
-        if (withRestart) {
-          await api(`/api/bots/${bot.id}/restart`, { method: 'POST' });
-          flash(`Saved + restarted ${bot.name}`, 'ok');
+        })) as { _restart?: 'ok' | 'failed'; _restart_error?: string };
+
+        if (r._restart === 'ok') {
+          flash(`Saved ${bot.name} — bot was running, auto-restarted to apply changes`, 'ok');
+        } else if (r._restart === 'failed') {
+          flash(`Saved ${bot.name} — but auto-restart FAILED: ${r._restart_error || 'unknown error'}. Click Restart on the bot card.`, 'err');
         } else {
-          flash(`Saved ${bot.name}`, 'ok');
+          // Bot wasn't running — just saved the config for next start.
+          flash(`Saved ${bot.name} (bot is stopped — config will apply on next start)`, 'ok');
+        }
+
+        // If the user explicitly clicked "Save & Restart" and the backend
+        // already restarted (because the bot was running), don't double-restart.
+        // Only restart if the bot was stopped and the user wanted a restart.
+        if (withRestart && !r._restart) {
+          await api(`/api/bots/${bot.id}/restart`, { method: 'POST' });
+          flash(`Started ${bot.name}`, 'ok');
         }
       }
       await onDone();
@@ -1053,15 +1067,17 @@ function BotEditor({
             <button
               onClick={() => doSave(true)}
               disabled={saving}
-              className="px-4 py-2 rounded-md bg-muted text-sm font-medium hover:bg-muted/70 disabled:opacity-50"
+              className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
+              title="Save config and (re)start the bot so changes take effect immediately"
             >
-              {saving ? 'Saving…' : 'Save & Restart'}
+              {saving ? 'Saving…' : 'Save & Apply'}
             </button>
           )}
           <button
             onClick={() => doSave(false)}
             disabled={saving}
-            className="px-4 py-2 rounded-md bg-primary text-primary-foreground text-sm font-medium hover:opacity-90 disabled:opacity-50"
+            className="px-4 py-2 rounded-md border border-border text-sm hover:bg-muted disabled:opacity-50"
+            title="Save config only. If the bot is running, it will be auto-restarted to apply changes. If stopped, config applies on next start."
           >
             {saving ? 'Saving…' : 'Save'}
           </button>
