@@ -60,3 +60,8 @@ server.log
 /server.log
 /tool-results/
 /db-backup/
+.env
+.env.local
+.env.production
+
+# Already-tracked DB / logs were removed; these prevent re-adding them
