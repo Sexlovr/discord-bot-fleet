@@ -2,11 +2,12 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { db } from '@/lib/db';
+import { ADMIN_PASSWORD } from '@/lib/env';
 import { randomBytes } from 'crypto';
 
 export async function POST(req: NextRequest) {
   const { password } = await req.json();
-  const adminPw = process.env.ADMIN_PASSWORD;
+  const adminPw = ADMIN_PASSWORD;
   if (!adminPw) {
     return NextResponse.json({ error: 'ADMIN_PASSWORD env not set. Set it in your .env file.' }, { status: 500 });
   }

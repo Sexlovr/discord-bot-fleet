@@ -3,6 +3,7 @@
 
 import OpenAI from 'openai';
 import { decryptString } from './crypto';
+import { LLM_API_KEY } from './env';
 import type { LLMProvider } from './types';
 
 export interface LLMMessage {
@@ -50,7 +51,7 @@ class OpenAICompatProvider {
     if (config.api_key_enc) {
       apiKey = decryptString(config.api_key_enc);
     } else {
-      apiKey = process.env.LLM_API_KEY || 'FAP!';
+      apiKey = LLM_API_KEY;
     }
     this.client = new OpenAI({ baseURL: config.proxy_url, apiKey });
     this.model = config.model;

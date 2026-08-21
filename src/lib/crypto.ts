@@ -1,19 +1,22 @@
 // AES-256-GCM encryption for bot tokens at rest.
-// Master key from MASTER_KEY env var (HF Secret equivalent).
-// In dev, falls back to a random key persisted to db/.master-key.
+// Master key from MASTER_KEY env var (or compiled-in fallback in env.ts).
+// In dev with neither set, falls back to a random key persisted to db/.master-key.
 
 import { randomBytes, createCipheriv, createDecipheriv, scryptSync } from 'crypto';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 import { join } from 'path';
+import { MASTER_KEY } from './env';
 
 const DB_DIR = join(process.cwd(), 'db');
 const KEY_FILE = join(DB_DIR, '.master-key');
 const SALT = 'discord-bot-fleet-v1-salt';
 
 function getMasterKey(): Buffer {
-  const envKey = process.env.MASTER_KEY;
-  if (envKey) {
-    return scryptSync(envKey, SALT, 32);
+  // Use the env.ts value (process.env.MASTER_KEY or compiled fallback).
+  // IMPORTANT: this MUST be the same key used when tokens were encrypted,
+  // otherwise decryptString() will throw on every bot start.
+  if (MASTER_KEY) {
+    return scryptSync(MASTER_KEY, SALT, 32);
   }
   // Dev fallback — random key persisted to file
   if (!existsSync(KEY_FILE)) {

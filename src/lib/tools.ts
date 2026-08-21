@@ -10,6 +10,7 @@ import cron from 'node-cron';
 import type { LLMTool } from './llm';
 import type { BotConfig, ToolContext as TCtx } from './types';
 import { decryptString } from './crypto';
+import { LLM_API_KEY, GITHUB_TOKEN, DATA_DIR as ENV_DATA_DIR } from './env';
 
 // ─── fetch_url with SSRF protection ───────────────────────────────────────
 const FETCH_URL_TOOL: LLMTool = {
@@ -131,7 +132,7 @@ async function pingProxyHandler(args: { proxy_url: string; api_key?: string; mod
   const openaiProvider = ctx.botConfig.providers.find(p => p.type === 'openai');
   const apiKey = args.api_key || (openaiProvider?.api_key_enc
     ? decryptString(openaiProvider.api_key_enc)
-    : process.env.LLM_API_KEY || 'FAP!');
+    : LLM_API_KEY);
   const result = await (await import('./llm')).LLMClient.ping(args.proxy_url, apiKey, args.model);
   return JSON.stringify(result);
 }
@@ -159,7 +160,7 @@ async function githubHandler(args: { owner: string; repo: string; kind: 'info' |
     'Accept': 'application/vnd.github+json',
     'User-Agent': 'discord-bot-fleet',
   };
-  if (process.env.GITHUB_TOKEN) headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
+  if (GITHUB_TOKEN) headers.Authorization = `Bearer ${GITHUB_TOKEN}`;
   const base = `https://api.github.com/repos/${encodeURIComponent(args.owner)}/${encodeURIComponent(args.repo)}`;
   try {
     if (args.kind === 'info') {
@@ -254,7 +255,7 @@ async function webSearchHandler(args: { query: string }): Promise<string> {
 }
 
 // ─── memory_read / memory_write ────────────────────────────────────────────
-const DATA_DIR = process.env.DATA_DIR || join(process.cwd(), 'db');
+const DATA_DIR = ENV_DATA_DIR || join(process.cwd(), 'db');
 const MEMORY_DIR = join(DATA_DIR, 'memory');
 if (!existsSync(MEMORY_DIR)) mkdirSync(MEMORY_DIR, { recursive: true });
 
