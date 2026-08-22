@@ -1,29 +1,42 @@
 // Next.js instrumentation — runs once on server startup.
 // https://nextjs.org/docs/app/api-reference/file-conventions/instrumentation
 //
-// On startup: pull the SQLite DB from HF Storage Bucket before the app
+// On startup: pull the SQLite DB from HF dataset repo before the app
 // starts serving requests. This ensures Prisma sees the latest DB state.
 // On shutdown: flush a final DB push so no writes are lost.
 
 export async function register() {
   // Only run on the server (Node.js runtime), not on the edge.
   if (process.env.NEXT_RUNTIME === 'nodejs') {
-    const { pullDbFromHf, flushNow, isHfPersistEnabled } = await import('./src/lib/hf-persist');
+    const { pullDbFromHf, flushNow, isHfPersistEnabled, markPullCompleted } = await import('./src/lib/hf-persist');
 
     if (isHfPersistEnabled()) {
-      console.log('[instrumentation] HF persistence is enabled — pulling DB from bucket...');
+      console.log('[instrumentation] HF persistence is enabled — pulling DB from dataset repo...');
       try {
         const result = await pullDbFromHf();
         if (result.ok) {
-          console.log(`[instrumentation] DB pull OK — ${result.bytes} bytes${result.fresh ? ' (fresh start — bucket was empty)' : ''}`);
+          console.log(`[instrumentation] DB pull OK — ${result.bytes} bytes${result.fresh ? ' (fresh start — repo was empty)' : ''}`);
+          // CRITICAL: mark pull as completed so schedulePush() will actually push.
+          // Without this, pushes are blocked to prevent the "empty DB wipes bucket" bug.
+          markPullCompleted();
+          // If this was a fresh start (repo was empty), do an immediate push to
+          // seed the repo with the current local DB schema.
+          if (result.fresh) {
+            const { schedulePush } = await import('./src/lib/hf-persist');
+            schedulePush(1000); // push after 1 second
+          }
         } else {
           console.warn('[instrumentation] DB pull failed — continuing with whatever local DB exists');
+          // Even on pull failure, mark pull completed so the app can still push
+          // (otherwise the app would never persist any state).
+          markPullCompleted();
         }
       } catch (e) {
         console.error('[instrumentation] DB pull error:', e);
+        markPullCompleted(); // unblock pushes even on error
       }
     } else {
-      console.log('[instrumentation] HF persistence is disabled (HF_TOKEN or HF_BUCKET not set)');
+      console.log('[instrumentation] HF persistence is disabled (HF_TOKEN or HF_DATASET_REPO not set)');
     }
 
     // Register shutdown hooks — flush one final DB push

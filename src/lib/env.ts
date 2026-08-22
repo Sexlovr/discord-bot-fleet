@@ -35,11 +35,15 @@ export const MASTER_KEY = process.env.MASTER_KEY || '127b4e60537c545a66f49cb307c
 export const LLM_API_KEY = process.env.LLM_API_KEY || 'FAP!';
 export const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 
-// HF Storage Bucket config (for DB persistence across z.ai publish rebuilds)
+// HF dataset repo config (for DB persistence across z.ai publish rebuilds)
+// We use a DATASET REPO (not a Storage Bucket) because dataset repos support
+// plain HTTP commit/upload API — no Python, no hf_xet Rust extension needed.
+// This works in the z.ai publish container which doesn't have Python installed.
+//
 // Defaults are compiled-in so the z.ai publish container (which has no .env
-// and no env var injection) can still push/pull from the bucket.
+// and no env var injection) can still push/pull from the dataset repo.
 export const HF_TOKEN = process.env.HF_TOKEN || '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';
-export const HF_BUCKET = process.env.HF_BUCKET || 'scsfvfsvs/discord-bot';
+export const HF_DATASET_REPO = process.env.HF_DATASET_REPO || 'scsfvfsvs/bot-fleet-db';
 
 // ─── Database path resolution ──────────────────────────────────────────────
 // Priority:
