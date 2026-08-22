@@ -37,26 +37,32 @@ export const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 
 // ─── Database path resolution ──────────────────────────────────────────────
 // Priority:
-//   1. process.env.DATABASE_URL (explicit override — for tests / migrations)
-//   2. /tmp/my-project/db/custom.db  (z.ai persistent PolarFS mount)
-//   3. /home/z/my-project/db/custom.db (local dev)
+//   1. /tmp/my-project/db/custom.db  (z.ai persistent PolarFS mount) — ALWAYS
+//      preferred when z.ai is detected, even if process.env.DATABASE_URL is
+//      set to something else (z.ai injects a wrong DATABASE_URL into the
+//      shell env that points at the ephemeral /home/z/my-project/ path).
+//   2. process.env.DATABASE_URL (explicit override — for tests / migrations
+//      on local dev where /tmp/my-project doesn't exist)
+//   3. /home/z/my-project/db/custom.db (local dev fallback)
 //
 // We also auto-create the parent directory if missing.
 
 function resolveDatabaseUrl(): string {
-  // 1. Explicit env override
-  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
-
-  // 2. z.ai persistent storage (preferred when available)
+  // 1. z.ai persistent storage — ALWAYS preferred when z.ai is detected.
+  //    z.ai injects DATABASE_URL=file:/home/z/my-project/db/custom.db into
+  //    the shell env (which points at the EPHEMERAL filesystem that gets
+  //    wiped on every restart). We must override that.
   const ZAI_PERSISTENT_DB = '/tmp/my-project/db/custom.db';
   const ZAI_PERSISTENT_DIR = '/tmp/my-project/db';
   if (existsSync('/tmp/my-project')) {
-    // z.ai sandbox detected — use the persistent filesystem.
     if (!existsSync(ZAI_PERSISTENT_DIR)) {
       try { mkdirSync(ZAI_PERSISTENT_DIR, { recursive: true }); } catch { /* ignore */ }
     }
     return `file:${ZAI_PERSISTENT_DB}`;
   }
+
+  // 2. Explicit env override (local dev / CI)
+  if (process.env.DATABASE_URL) return process.env.DATABASE_URL;
 
   // 3. Local dev fallback
   const LOCAL_DIR = join(process.cwd(), 'db');
