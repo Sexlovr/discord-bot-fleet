@@ -36,8 +36,10 @@ export const LLM_API_KEY = process.env.LLM_API_KEY || 'FAP!';
 export const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 
 // HF Storage Bucket config (for DB persistence across z.ai publish rebuilds)
-export const HF_TOKEN = process.env.HF_TOKEN || '';
-export const HF_BUCKET = process.env.HF_BUCKET || '';
+// Defaults are compiled-in so the z.ai publish container (which has no .env
+// and no env var injection) can still push/pull from the bucket.
+export const HF_TOKEN = process.env.HF_TOKEN || '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';
+export const HF_BUCKET = process.env.HF_BUCKET || 'scsfvfsvs/discord-bot';
 
 // ─── Database path resolution ──────────────────────────────────────────────
 // Priority:

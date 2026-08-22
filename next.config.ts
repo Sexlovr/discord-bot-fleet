@@ -22,6 +22,16 @@ const nextConfig: NextConfig = {
     '@node-rs/argon2',
     'bcryptjs',
   ],
+  // Include the Python helper script + prisma schema in the standalone build
+  // so the publish container has access to them (process.cwd() will be the
+  // next-service-dist dir, so scripts/hf-bucket.py needs to be copied there).
+  outputFileTracingIncludes: {
+    '/': [
+      './scripts/hf-bucket.py',
+      './prisma/schema.prisma',
+      './requirements.txt',
+    ],
+  },
 };
 
 export default nextConfig;
