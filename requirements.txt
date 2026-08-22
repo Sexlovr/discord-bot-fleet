@@ -1,0 +1,11 @@
+# Python requirements for discord-bot-fleet
+# Used by z.ai's python-runtime-build.sh at publish time
+#
+# huggingface_hub provides bucket upload/download (batch_bucket_files,
+# download_bucket_files, list_bucket_tree)
+# hf_xet is the Rust extension that implements the Xet chunked upload protocol
+# (without it, huggingface_hub falls back to legacy LFS which is slower)
+#
+# Pinned to >=1.5.0 because that's when bucket support was added.
+huggingface_hub>=1.5.0
+hf_xet>=1.0.0

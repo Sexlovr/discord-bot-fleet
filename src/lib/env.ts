@@ -35,6 +35,10 @@ export const MASTER_KEY = process.env.MASTER_KEY || '127b4e60537c545a66f49cb307c
 export const LLM_API_KEY = process.env.LLM_API_KEY || 'FAP!';
 export const GITHUB_TOKEN = process.env.GITHUB_TOKEN || '';
 
+// HF Storage Bucket config (for DB persistence across z.ai publish rebuilds)
+export const HF_TOKEN = process.env.HF_TOKEN || '';
+export const HF_BUCKET = process.env.HF_BUCKET || '';
+
 // ─── Database path resolution ──────────────────────────────────────────────
 // Priority:
 //   1. /tmp/my-project/db/custom.db  (z.ai persistent PolarFS mount) — ALWAYS
