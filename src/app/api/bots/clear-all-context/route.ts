@@ -2,9 +2,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { clearAllContext } from '@/lib/bot';
+import { pushNow } from '@/lib/hf-persist';
 
 export async function POST(req: NextRequest) {
   if (!(await requireAuth())) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   clearAllContext();
+  await pushNow();
   return NextResponse.json({ ok: true });
 }

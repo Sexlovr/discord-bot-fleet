@@ -104,10 +104,17 @@ export async function pullDbFromHf(): Promise<{ ok: boolean; bytes: number; fres
     }
     const buf = Buffer.from(await resp.arrayBuffer());
     // CRITICAL: don't overwrite local DB with an empty remote file.
-    // This can happen if the dataset repo has a stale empty custom.db
-    // (e.g., from a previous delete operation that left an empty file).
     if (buf.length === 0) {
       console.log('[hf-persist] remote file is 0 bytes — treating as fresh start');
+      return { ok: true, bytes: 0, fresh: true };
+    }
+    // MAGIC-BYTE CHECK: SQLite databases start with "SQLite format 3\0" (16 bytes).
+    // If the downloaded file doesn't start with these bytes, it's likely an HTML
+    // error page (e.g., CloudFront 429) that got uploaded as custom.db by a
+    // previous buggy push. Refuse to use it — treat as fresh start.
+    const SQLITE_MAGIC = Buffer.from('SQLite format 3\0');
+    if (buf.length < 16 || buf.slice(0, 16).toString() !== SQLITE_MAGIC.toString()) {
+      console.error(`[hf-persist] remote file is NOT a SQLite database (first 16 bytes: ${buf.slice(0, 16).toString('hex')}). Treating as fresh start.`);
       return { ok: true, bytes: 0, fresh: true };
     }
     await writeFile(localPath, buf);
@@ -157,6 +164,20 @@ async function pushDbToHf(): Promise<void> {
     return; // no-op, file unchanged
   }
 
+  // MAGIC-BYTE CHECK: never push a file that isn't a valid SQLite database.
+  // This prevents uploading HTML error pages (e.g., CloudFront 429) as custom.db.
+  const SQLITE_MAGIC = Buffer.from('SQLite format 3\0');
+  if (buf.length < 16 || buf.slice(0, 16).toString() !== SQLITE_MAGIC.toString()) {
+    console.error(`[hf-persist] push ABORTED: local DB is not a valid SQLite file (first 16 bytes: ${buf.slice(0, 16).toString('hex')}). Refusing to upload corrupt data.`);
+    return;
+  }
+
+  // SAFETY CHECK: never push a DB smaller than 40KB (empty schema is ~36KB).
+  if (buf.length < 40000) {
+    console.warn(`[hf-persist] push ABORTED: local DB is ${buf.length} bytes (likely empty schema) — refusing to push to remote`);
+    return;
+  }
+
   console.log(`[hf-persist] pushing ${buf.length} bytes to dataset (hash ${currentHash.slice(0, 12)})`);
   const b64 = buf.toString('base64');
   const body = JSON.stringify({
@@ -164,21 +185,35 @@ async function pushDbToHf(): Promise<void> {
     files: [{ path: REMOTE_DB_KEY, content: b64, encoding: 'base64' }],
   });
 
-  try {
-    const resp = await hfFetch(`/api/datasets/${HF_DATASET_REPO}/commit/main`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body,
-    }, 120000);
-    if (resp.ok) {
-      lastPushedHash = currentHash;
-      console.log(`[hf-persist] pushed ${buf.length} bytes`);
-    } else {
-      const text = await resp.text().catch(() => '');
-      console.error(`[hf-persist] push HTTP ${resp.status}: ${text.slice(0, 300)}`);
+  // Retry with exponential backoff on 429 (rate limit)
+  const MAX_RETRIES = 3;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const resp = await hfFetch(`/api/datasets/${HF_DATASET_REPO}/commit/main`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      }, 120000);
+      if (resp.ok) {
+        lastPushedHash = currentHash;
+        console.log(`[hf-persist] pushed ${buf.length} bytes (attempt ${attempt})`);
+        return;
+      } else if (resp.status === 429 && attempt < MAX_RETRIES) {
+        const waitMs = 5000 * attempt; // 5s, 10s, 15s
+        console.warn(`[hf-persist] push got 429 (attempt ${attempt}/${MAX_RETRIES}) — waiting ${waitMs}ms...`);
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
+      } else {
+        const text = await resp.text().catch(() => '');
+        console.error(`[hf-persist] push HTTP ${resp.status}: ${text.slice(0, 300)}`);
+        return;
+      }
+    } catch (e) {
+      console.error(`[hf-persist] push failed (attempt ${attempt}):`, (e as Error).message);
+      if (attempt < MAX_RETRIES) {
+        await new Promise(r => setTimeout(r, 5000 * attempt));
+      }
     }
-  } catch (e) {
-    console.error('[hf-persist] push failed:', (e as Error).message);
   }
 }
 
@@ -239,4 +274,85 @@ export async function listRemoteFiles(): Promise<Array<{ path: string; size: num
   } catch {
     return [];
   }
+}
+
+// ─── Public API: pushNow (synchronous — awaits the push) ──────────────────
+// Use this in critical mutations (POST/PUT/DELETE) so the push happens
+// BEFORE the response is returned. This guarantees the change is persisted
+// to HF even if the container is killed immediately after.
+
+export async function pushNow(): Promise<{ ok: boolean; bytes: number; error?: string }> {
+  if (!isHfPersistEnabled()) return { ok: false, bytes: 0, error: 'HF persistence disabled' };
+  // Cancel any pending debounced push (we're doing it now)
+  if (pushDebounceTimer) {
+    clearTimeout(pushDebounceTimer);
+    pushDebounceTimer = null;
+  }
+  // Wait for any in-flight push
+  if (pendingPush) {
+    try { await pendingPush; } catch { /* ignore */ }
+  }
+  // Read local DB and push it
+  const localPath = localDbPath();
+  let buf: Buffer;
+  try {
+    buf = await readFile(localPath);
+  } catch (e) {
+    return { ok: false, bytes: 0, error: `cannot read local DB: ${(e as Error).message}` };
+  }
+  const currentHash = sha256(buf);
+  if (currentHash === lastPushedHash) {
+    return { ok: true, bytes: buf.length }; // no-op, already pushed
+  }
+
+  // MAGIC-BYTE CHECK: never push a non-SQLite file
+  const SQLITE_MAGIC = Buffer.from('SQLite format 3\0');
+  if (buf.length < 16 || buf.slice(0, 16).toString() !== SQLITE_MAGIC.toString()) {
+    return { ok: false, bytes: buf.length, error: `local DB is not a valid SQLite file — refusing to push corrupt data` };
+  }
+
+  // SAFETY CHECK: never push tiny DBs (< 40KB = empty schema)
+  if (buf.length < 40000) {
+    return { ok: false, bytes: buf.length, error: `local DB too small (${buf.length} bytes) — refusing to push empty schema to remote` };
+  }
+
+  console.log(`[hf-persist] pushNow: pushing ${buf.length} bytes (hash ${currentHash.slice(0, 12)})`);
+  const b64 = buf.toString('base64');
+  const body = JSON.stringify({
+    summary: `DB snapshot ${new Date().toISOString()}`,
+    files: [{ path: REMOTE_DB_KEY, content: b64, encoding: 'base64' }],
+  });
+
+  // Retry with exponential backoff on 429
+  const MAX_RETRIES = 3;
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+    try {
+      const resp = await hfFetch(`/api/datasets/${HF_DATASET_REPO}/commit/main`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+      }, 120000);
+      if (resp.ok) {
+        lastPushedHash = currentHash;
+        console.log(`[hf-persist] pushNow: pushed ${buf.length} bytes (attempt ${attempt})`);
+        return { ok: true, bytes: buf.length };
+      } else if (resp.status === 429 && attempt < MAX_RETRIES) {
+        const waitMs = 5000 * attempt;
+        console.warn(`[hf-persist] pushNow got 429 (attempt ${attempt}/${MAX_RETRIES}) — waiting ${waitMs}ms...`);
+        await new Promise(r => setTimeout(r, waitMs));
+        continue;
+      } else {
+        const text = await resp.text().catch(() => '');
+        return { ok: false, bytes: 0, error: `HTTP ${resp.status}: ${text.slice(0, 200)}` };
+      }
+    } catch (e) {
+      if (attempt < MAX_RETRIES) {
+        console.warn(`[hf-persist] pushNow failed (attempt ${attempt}), retrying...`);
+        await new Promise(r => setTimeout(r, 5000 * attempt));
+      } else {
+        return { ok: false, bytes: 0, error: (e as Error).message };
+      }
+    }
+  }
+  return { ok: false, bytes: 0, error: 'max retries exceeded' };
 }

@@ -6,6 +6,7 @@ import { requireAuth } from '@/lib/auth';
 import { encryptString } from '@/lib/crypto';
 import { sanitizeBot } from '@/lib/types';
 import { nanoid } from 'nanoid';
+import { pushNow } from '@/lib/hf-persist';
 
 export async function GET() {
   if (!(await requireAuth())) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
@@ -68,5 +69,6 @@ export async function POST(req: NextRequest) {
       status: 'stopped',
     },
   });
+  await pushNow();
   return NextResponse.json({ ok: true, bot: sanitizeBot(bot) });
 }

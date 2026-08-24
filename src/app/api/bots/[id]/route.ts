@@ -8,6 +8,7 @@ import { requireAuth } from '@/lib/auth';
 import { encryptString, decryptString, maskToken } from '@/lib/crypto';
 import { sanitizeBot } from '@/lib/types';
 import { stopBot, startBot, isBotRunning } from '@/lib/bot';
+import { pushNow } from '@/lib/hf-persist';
 
 export async function GET(req: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   if (!(await requireAuth())) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
@@ -143,6 +144,7 @@ export async function PUT(req: NextRequest, { params }: { params: Promise<{ id: 
     }
   }
 
+  await pushNow();
   return NextResponse.json({
     ...sanitizeBot(updated),
     ...(wasRunning ? { _restart: restarted ? 'ok' : 'failed', _restart_error: restartError } : {}),

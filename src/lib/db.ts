@@ -54,3 +54,14 @@ function createPrismaClient(): PrismaClient {
 export const db = globalForPrisma.prisma ?? createPrismaClient()
 
 if (process.env.NODE_ENV !== 'production') globalForPrisma.prisma = db
+
+// Force Prisma to reconnect — call this after the DB file has been swapped
+// (e.g., after fetch-from-hf overwrites the local DB).
+export async function reconnectDb(): Promise<void> {
+  try {
+    await db.$disconnect();
+  } catch { /* ignore */ }
+  try {
+    await db.$connect();
+  } catch { /* ignore */ }
+}

@@ -5,10 +5,12 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { requireAuth } from '@/lib/auth';
 import { stopAllBots, listRunningBots } from '@/lib/bot';
+import { pushNow } from '@/lib/hf-persist';
 
 export async function POST(req: NextRequest) {
   if (!(await requireAuth())) return NextResponse.json({ error: 'unauthorized' }, { status: 401 });
   const before = listRunningBots();
   await stopAllBots();
+  await pushNow();
   return NextResponse.json({ ok: true, stopped: before.length, ids: before });
 }
